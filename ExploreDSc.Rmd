@@ -1,0 +1,35 @@
+```{r}
+
+```
+
+
+
+```{r}
+
+scale_fun <- function(k, p, s, xi, eta) {
+  
+  inner_term <- 1 + (xi^(-1/eta) - 1) * (k - 1)
+  middle_term <- 1 + (p^(-s) - 1) * (inner_term^eta)
+  pk <- middle_term^(-1/s)
+  return(pk)
+}
+
+k<-seq(1,500,1)
+
+
+#the parameter s> 0 and the other parameters p, eta and xi range in the interval [0, 1]
+p <- 0.5
+s <- 3
+x <- 0.8
+eta <- 0.5
+
+
+y_vals<-scale_fun(k,p ,s,xi,eta)
+
+
+plot(k,y_vals)
+
+
+
+```
+
