@@ -1,35 +1,201 @@
-```{r}
-
+```{r message=FALSE, warning=FALSE}
+library(dplyr)
+library(readxl)
+library(ggplot2)
+library(lubridate)
 ```
 
 
 
 ```{r}
+gdrive_path <- file.path(Sys.getenv("USERPROFILE"), "Desktop", "GDrive")
+project_path <- file.path(gdrive_path,"Academic_git/DownScaling")
+generalData_path <- file.path(gdrive_path,"General_Data")
+```
 
-scale_fun <- function(k, p, s, xi, eta) {
+
+
+
+```{r}
+# 2. Read the data 
+df <- read_excel(file.path(generalData_path,"EL08_precipitation.xlsx"),col_names = FALSE)
+
+colnames(df)[2] <- "datetime"
+colnames(df)[3:ncol(df)]<-seq(3,ncol(df),1)
+
+df$datetime<-format(as.Date(df$datetime), "%Y%m%d")
+
+
+for (station_column in 3:ncol(df)) {
+ 
+
+
+station_column<-3
+
+#3 is the station
+values <-df[[station_column]][8:nrow(df)]
+
+values[is.na(values) | values == ""] <- c(-999)
   
-  inner_term <- 1 + (xi^(-1/eta) - 1) * (k - 1)
-  middle_term <- 1 + (p^(-s) - 1) * (inner_term^eta)
-  pk <- middle_term^(-1/s)
-  return(pk)
+starting_index<-7+which(values!="-999")[1]
+end_index<-7+tail(which(values!="-999"),1)
+ 
+ 
+start_dt <- df$datetime[starting_index]
+end_dt <- df$datetime[end_index]
+ 
+num_records <- end_index-starting_index
+percent_missing <- round((sum(values[starting_index:end_index] == -999) / num_records) * 100, 2)
+  
+
+  header <- c(
+    paste0("Station ID: ", paste0("EL04_S",station_column-2)),
+    paste0("Country: Greece"),  
+    paste0("Original Station Name: ",  df[[station_column]][1]),
+    paste0("Source: ", "WD"),   
+    paste0("Owner: ",df[[station_column]][5]),
+    paste0("X: ", df[[station_column]][2]), 
+    paste0("Y: ", df[[station_column]][3]), 
+    paste0("Z: ", df[[station_column]][4]), 
+    paste0("Start datetime: ", start_dt),
+    paste0("End datetime: ", end_dt),
+    paste0("Number of records: ", num_records),
+    paste0("Percent missing data: ", format(percent_missing, nsmall=2)),
+    "Original Timestep: 24hr",
+    "Original Units: mm",
+    "No data value: -999",""
+  )
+  
+  # Combine header and the data values
+  output_lines <- c(header, values[starting_index:end_index])
+ 
+  # Write to the text file in the current WD
+  output_filename <- paste0(df[[station_column]][1],"_",df[[station_column]][5], "_.txt")
+  writeLines(output_lines, output_filename)
+  
 }
 
-k<-seq(1,500,1)
-
-
-#the parameter s> 0 and the other parameters p, eta and xi range in the interval [0, 1]
-p <- 0.5
-s <- 3
-x <- 0.8
-eta <- 0.5
-
-
-y_vals<-scale_fun(k,p ,s,xi,eta)
-
-
-plot(k,y_vals)
-
 
 
 ```
+
+
+```{r}
+file_path <- file.path(generalData_path,"EL08/agchialos_EMY_.txt")
+
+header_lines <- readLines(file_path, n = 17)
+start_line <- grep("^Start datetime:", header_lines, value = TRUE)
+start_date_str <- sub("Start datetime: ", "", start_line)
+start_date <- as.Date(start_date_str, format = "%Y%m%d")
+
+df <- read.table(file_path, skip = 17,col.names = c("Precipitation_mm"))
+df$Precipitation_mm[df$Precipitation_mm == -999] <- NA
+df$Date <- seq(start_date, by = "day", length.out = nrow(df))
+
+
+ggplot(df, aes(x = Date, y = Precipitation_mm)) +
+  geom_line(color = "blue", linewidth = 0.5) +
+  labs(
+    title = paste("Daily Precipitation (Starting:", start_date, ")"),
+    x = "Date",
+    y = "Precipitation (mm)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    axis.title = element_text(size = 12)
+  )
+
+```
+
+
+
+```{r}
+
+# --- 1. SET YOUR AGGREGATION LENGTH ---
+# You can change this number to whatever you want (e.g., 4, 7, 10)
+agg_length <- 4 
+
+# --- 2. READ THE DATA ---
+# Skip the 15 lines of metadata at the top of the text file
+file_path <- file.path(generalData_path,"EL08/agchialos_EMY_.txt")
+df <- read.table(file_path, skip = 16, col.names = "precip")
+
+# --- 3. CLEAN MISSING VALUES ---
+# The metadata says "-999" is the 'no data' value. We convert these to standard R NAs.
+df$precip[df$precip == -999] <- NA
+
+# --- 4. ADD DATES ---
+# Create a sequence of dates based on the start and end dates in the file header
+
+header_lines <- readLines(file_path, n = 16)
+
+start_line <- grep("^Start datetime:", header_lines, value = TRUE)
+start_date_str <- sub("Start datetime: ", "", start_line)
+
+
+end_line <- grep("^End datetime:", header_lines, value = TRUE)
+end_date_str <- sub("End datetime: ", "", end_line)# sensitive even in spacebar
+
+
+start_ts <- ymd(start_date_str)
+end_ts <- ymd(end_date_str)
+
+df$date <- seq(start_ts, end_ts, by = "day")
+
+
+
+# --- 5. ASSIGN BINS BASED ON THE CALENDAR YEAR ---
+df <- df %>%
+  mutate(
+    # Shift every date forward by 3 months. 
+    # October 1st becomes January 1st!
+    Hdate = date %m+% months(3),
+    
+    # Now just extract the year from the shifted date
+    Hyear = year(Hdate),
+    
+    # Because Oct 1st is now Jan 1st, yday() perfectly starts at 1
+    bin_in_Hyear = (yday(Hdate) - 1) %/% agg_length
+  )
+
+
+# --- 6. AGGREGATE THE BINS ---
+df_aggregated <- df %>%
+  # Group by both the Year and the specific Bin ID we just created
+  group_by(year, bin_in_year) %>%
+  summarise(
+    bin_start_date = min(date),
+    bin_end_date = max(date),
+    # Count how many days actually fell into this bin
+    days_in_bin = n(),
+    
+    # Calculate the sum. 
+    # na.rm = FALSE ensures that if there is even one NA, the whole sum becomes NA.
+    total_precip = sum(precip, na.rm = FALSE),
+    
+    .groups = "drop" # Clean up the grouping
+  )
+
+# --- 7. APPLY REJECTION RULES ---
+# We want to reject the bin if:
+# a) It contains an NA value (total_precip became NA in the step above)
+# b) It doesn't have the full number of days (e.g., leftover days at the end of the year)
+df_final <- df_aggregated %>%
+  filter(!is.na(total_precip) & days_in_bin == agg_length) %>%
+  # Keep only the dates and the final summed value
+  select(bin_start_date, bin_end_date, total_precip)
+
+# View the final result
+head(df_final)
+```
+
+
+
+
+
+
+
+
+
 
