@@ -1,0 +1,244 @@
+```{r message=FALSE, warning=FALSE}
+library(dplyr)
+library(readxl)
+library(ggplot2)
+library(lubridate)
+```
+
+
+
+```{r}
+gdrive_path <- paste(LETTERS[file.exists(paste0(LETTERS, ":/My Drive"))],":/My Drive",sep = "")
+project_path <- file.path(gdrive_path,"Academic_git/DownScaling")
+generalData_path <- file.path(gdrive_path,"General_Data")
+```
+
+
+
+
+
+
+```{r}
+
+library(dplyr)
+library(lubridate)
+
+# --- 1 & 2. READ THE DATA AND DATES ---
+file_path <- file.path(generalData_path,"EL08/makrinitsa_YPEN_.txt")
+df <- read.table(file_path, skip = 16, col.names = "precip")
+
+# Clean NAs
+df$precip[df$precip == -999] <- NA
+
+# Extract dates dynamically from header
+header_lines <- readLines(file_path, n = 16)
+start_line <- grep("^Start datetime:", header_lines, value = TRUE)
+start_date_str <- sub("Start datetime: ", "", start_line)
+end_line <- grep("^End datetime:", header_lines, value = TRUE)
+end_date_str <- sub("End datetime: ", "", end_line)
+
+start_ts <- ymd(start_date_str)
+end_ts <- ymd(end_date_str)
+df$date <- seq(start_ts, end_ts, by = "day")
+
+# --- 3. CONVERT TO AVERAGED PROCESS (CRITICAL FOR CLIMACOGRAM) ---
+# Since your goal is 15-minute statistics, k=1 is 15 minutes. 
+# There are 96 15-minute intervals in a day (24 hours * 4). 
+# We divide the daily accumulated volume by 96 to get the 
+# "averaged process" intensity.
+intervals_per_day <- 96
+df$precip_rate <- df$precip / intervals_per_day
+
+# --- 4. CALCULATE VARIANCES ACROSS MULTIPLE SCALES ---
+# Define the blocks of days we want to aggregate over
+aggregation_days <- c(1:100)
+
+# Convert days into the fundamental scale k (number of 15-min intervals)
+empirical_k <- aggregation_days * intervals_per_day 
+empirical_var <- numeric(length(aggregation_days))
+
+# Loop your exact binning logic over the different aggregation lengths
+for (i in seq_along(aggregation_days)) {
+  
+  agg_length <- aggregation_days[i]
+  
+  # Standard calendar year binning and mean calculation
+  df_aggregated <- df %>%
+    mutate(
+      # Extract the standard calendar year
+      cal_year = year(date),
+      
+      # Group by the standard day of the year (starts perfectly at Jan 1st)
+      bin_in_year = (yday(date) - 1) %/% agg_length
+    ) %>%
+    # Group by the standard year and bin
+    group_by(cal_year, bin_in_year) %>%
+    summarise(
+      days_in_bin = n(),
+      mean_precip = mean(precip_rate, na.rm = FALSE),
+      .groups = "drop"
+    ) %>%
+    # Your exact rejection rules
+    filter(!is.na(mean_precip) & days_in_bin == agg_length)
+  
+  # Extract the variance of the block means for this specific scale
+  empirical_var[i] <- var(df_aggregated$mean_precip)
+}
+
+# --- 5. DEFINE ALTERNATIVE CAUCHY CLIMACOGRAM MODELS ---
+
+# Model 1: Cauchy-type climacogram 
+climacogram_gen_cauchy <- function(k, params) {
+  gamma_1 <- params[1]; alpha <- params[2]; H <- params[3]; M <- params[4]
+  gamma_1 * ( (alpha^(2*M) + k^(2*M)) / (alpha^(2*M) + 1))^ ((H - 1) / M) 
+}
+
+# Model 2: Hurst-Kolmogorov (HK) process
+climacogram_simple_cauchy <- function(k, params) {
+  gamma_1 <- params[1]; alpha <- params[2]; H <- params[3]
+  gamma_1 * ( (alpha / k)) ^ (2- 2*H)
+}
+
+# Model 3: Hybrid Hurst-Kolmogorov (HHK) process
+climacogram_short_cauchy <- function(k, params) {
+  gamma_1 <- params[1]; alpha <- params[2]; H <- params[3]; M <- params[4]
+  gamma_1 * ((1+(k/alpha)^(2*M)) ^ ((H - 1) / M))
+}
+
+# General Objective Function Wrapper
+objective_function <- function(params, model_func) {
+  modeled_var <- model_func(empirical_k, params)
+  # Minimize sum of squared relative errors
+  sum( ((empirical_var - modeled_var) / empirical_var)^2 )
+}
+
+
+
+# --- 6. RUN OPTIMIZATION FOR ALL 3 ALTERNATIVE MODELS --- 
+
+
+ # We provide a stronger initial guess for 15-min variance (gamma_1)
+
+guess_gamma_1 <- empirical_var[1] *100
+
+
+# --- Fit Model 1: Cauchy-type climacogram ---
+
+init_1 <- c(gamma_1 = guess_gamma_1, alpha = 10, H = 0.5, M = 0.25)
+low_1  <- c(gamma_1 = 1e-6, alpha = 1e-3, H = 1e-3, M = 1e-3)
+up_1   <- c(gamma_1 = Inf,  alpha = 1000, H = 1.0-1e-3,  M = 1.0-1e-3)
+
+fit_1 <- optim(par = init_1, fn = objective_function, model_func = climacogram_gen_cauchy,
+               method = "L-BFGS-B", lower = low_1, upper = up_1, control = list(maxit=5000)) 
+
+
+ # --- Fit Model 2: Hurst-Kolmogorov (HK) process ---
+
+init_2 <- c(gamma_1 = guess_gamma_1, alpha = 10, H = 0.5)
+low_2  <- c(gamma_1 = 1e-6, alpha = 1e-3, H = 1e-3)
+up_2   <- c(gamma_1 = Inf,  alpha = 1000, H = 1.0)
+
+fit_2 <- optim(par = init_2, fn = objective_function, model_func = climacogram_simple_cauchy,
+               method = "L-BFGS-B", lower = low_2, upper = up_2, control = list(maxit=5000)) 
+
+
+
+ # --- Fit Model 3: Hybrid Hurst-Kolmogorov (HHK) process ---
+
+init_3 <- c(gamma_1 = guess_gamma_1, alpha = 10, H = 0.5, M = 0.25)
+low_3  <- c(gamma_1 = 1e-6, alpha = 1e-3, H = 1e-3, M = 1e-3)
+up_3   <- c(gamma_1 = Inf,  alpha = 1000, H = 1.0-1e-3,  M = 1.0-1e-3)
+
+
+fit_3 <- optim(par = init_3, fn = objective_function, model_func = climacogram_short_cauchy,
+               method = "L-BFGS-B", lower = low_3, upper = up_3, control = list(maxit=5000)) 
+
+
+# --- Fit Model 1: Cauchy-type climacogram ---
+# (Optimization code remains exactly the same...)
+var_15min_1 <- climacogram_gen_cauchy(1, fit_1$par)
+cat(sprintf("[1] Cauchy-type climacogram -> 15-min Var: %.4f \n", var_15min_1))
+
+# --- Fit Model 2: Hurst-Kolmogorov (HK) process ---
+# (Optimization code remains exactly the same...)
+var_15min_2 <- climacogram_simple_cauchy(1, fit_2$par)
+cat(sprintf("[2] Hurst-Kolmogorov (HK) process     -> 15-min Var: %.4f \n", var_15min_2))
+
+# --- Fit Model 3: Hybrid Hurst-Kolmogorov (HHK) process ---
+# (Optimization code remains exactly the same...)
+var_15min_3 <- climacogram_short_cauchy(1, fit_3$par)
+cat(sprintf("[3] Hybrid Hurst-Kolmogorov (HHK) process -> 15-min Var: %.4f \n", var_15min_3))
+
+```
+
+
+
+
+
+
+
+
+```{r}
+
+
+
+# --- 1. PREPARE THE DATA FOR PLOTTING ---
+# Empirical data points (from your aggregated coarse scales)
+df_empirical <- data.frame(
+  k = empirical_k,
+  variance = empirical_var
+)
+
+
+# Generate a continuous sequence of k values (from 15-min up to 30 days)
+k_seq <- exp(seq(log(1), log(max(empirical_k)), length.out = 200))
+
+
+# Create a combined dataframe for the 3 fitted model lines
+df_lines <- rbind(
+  data.frame(k = k_seq, variance = climacogram_gen_cauchy(k_seq, fit_1$par), 
+             Model = "1.Cauchy-type climacogram"),
+  data.frame(k = k_seq, variance = climacogram_simple_cauchy(k_seq, fit_2$par), 
+             Model = "2. Hurst-Kolmogorov (HK) process"),
+  data.frame(k = k_seq, variance = climacogram_short_cauchy(k_seq, fit_3$par), 
+             Model = "3. Hybrid Hurst-Kolmogorov (HHK) process")
+) 
+
+
+
+# Create a dataframe for the 3 downscaled points at k = 1 (15-min scale)
+# FIX: Use the truly evaluated variances, not the raw scale parameters
+df_downscaled <- data.frame(
+  k = c(1, 1, 1),
+  variance = c(var_15min_1, var_15min_2, var_15min_3),
+  Model = c("1.Cauchy-type climacogram", "2. Hurst-Kolmogorov (HK) process", "3. Hybrid Hurst-Kolmogorov (HHK) process")
+)
+
+# --- 2. CREATE THE LOG-LOG COMPARISON PLOT ---
+ggplot() +
+  geom_line(data = df_lines, aes(x = k, y = variance, color = Model, linetype = Model), linewidth = 1) +
+  geom_point(data = df_downscaled, aes(x = k, y = variance, color = Model), size = 5, shape = 18) +
+  geom_point(data = df_empirical, aes(x = k, y = variance), color = "black", size = 3) +
+  
+  # FIX: Make sure BOTH axes are logarithmic
+  scale_x_log10(breaks = c(1, 96, 96*10, 96*30),
+                labels = c("15-min\n(k=1)", "1 Day\n(k=96)", "10 Days", "30 Days")) +
+
+  
+  scale_color_brewer(palette = "Set1") +
+  labs(
+    title = "Comparison of 15-min Variance Downscaling",
+    subtitle = "Evaluating 3 alternative Cauchy climacogram models",
+    x = "Scale k (number of 15-min intervals)",
+    y = "Variance (Log Scale)",
+    color = "Fitted Models",
+    linetype = "Fitted Models"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "vertical",
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(face = "bold")
+  )
+```
