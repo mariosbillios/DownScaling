@@ -8,7 +8,7 @@ library(lubridate)
 
 
 ```{r}
-gdrive_path <- file.path(Sys.getenv("USERPROFILE"), "Desktop", "GDrive")
+gdrive_path <- paste(LETTERS[file.exists(paste0(LETTERS, ":/My Drive"))],":/My Drive",sep = "")
 project_path <- file.path(gdrive_path,"Academic_git/DownScaling")
 generalData_path <- file.path(gdrive_path,"General_Data")
 ```
