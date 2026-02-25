@@ -120,6 +120,14 @@ results <- data.frame(
   L_variation_pos = empirical_L_var_pos,
   L_skewness_pos = empirical_L_skew_pos
 )
+
+valid_bins <- inspection_list$scale_1d %>%
+    filter(is_valid_bin) %>%
+    distinct(bin_id, bin_mean_precip)
+
+var(valid_bins$bin_mean_precip)
+
+
 ```
 
 

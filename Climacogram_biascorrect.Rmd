@@ -125,8 +125,8 @@ climacogram_HHK <- function(k, params) {
 
 
 # --- Define Total Length T for Bias Correction ---
-# T must be in the same units as empirical_k (15-min intervals)
-T_length <- nrow(df) * intervals_per_day
+
+T_length <- nrow(df) 
 # --- 6. EXPLICIT OBJECTIVE FUNCTIONS (BIAS-CORRECTED) ---
 
 # Objective function specific to the HK model
