@@ -17,13 +17,13 @@ generalData_path <- file.path(gdrive_path,"General_Data")
 
 
 
-
 ```{r}
+
 library(dplyr)
 library(lubridate)
 
 # --- 1 & 2. READ THE DATA AND DATES ---
-file_path <- file.path(generalData_path,"EL08/agchialos_EMY_.txt")
+file_path <- file.path(generalData_path,"EL08/spilia_YPEN_.txt")
 df <- read.table(file_path, skip = 16, col.names = "precip")
 
 # Clean NAs
@@ -40,36 +40,48 @@ start_ts <- ymd(start_date_str)
 end_ts <- ymd(end_date_str)
 df$date <- seq(start_ts, end_ts, by = "day")
 
-# --- 3. CONVERT TO AVERAGED PROCESS ---
+# --- 3. CONVERT TO AVERAGED PROCESS (CRITICAL FOR CLIMACOGRAM) ---
+# Since your goal is 15-minute statistics, k=1 is 15 minutes. 
+# There are 96 15-minute intervals in a day (24 hours * 4). 
+# We divide the daily accumulated volume by 96 to get the 
+# "averaged process" intensity.
 intervals_per_day <- 96
 df$precip_rate <- df$precip / intervals_per_day
 
-# Calculate Total Observation Period (T) in fundamental 15-min intervals
-# This is required for the Bias Correction factor
-T_scale <- nrow(df) * intervals_per_day
-
 # --- 4. CALCULATE VARIANCES ACROSS MULTIPLE SCALES ---
+# Define the blocks of days we want to aggregate over
 aggregation_days <- c(1:100)
+
+# Convert days into the fundamental scale k (number of 15-min intervals)
 empirical_k <- aggregation_days * intervals_per_day 
 empirical_var <- numeric(length(aggregation_days))
 
+# Loop your exact binning logic over the different aggregation lengths
 for (i in seq_along(aggregation_days)) {
+  
   agg_length <- aggregation_days[i]
   
+  # Standard calendar year binning and mean calculation
   df_aggregated <- df %>%
     mutate(
+      # Extract the standard calendar year
       cal_year = year(date),
+      
+      # Group by the standard day of the year (starts perfectly at Jan 1st)
       bin_in_year = (yday(date) - 1) %/% agg_length
     ) %>%
+    # Group by the standard year and bin
     group_by(cal_year, bin_in_year) %>%
     summarise(
       days_in_bin = n(),
       mean_precip = mean(precip_rate, na.rm = FALSE),
       .groups = "drop"
     ) %>%
+    # Your exact rejection rules
     filter(!is.na(mean_precip) & days_in_bin == agg_length)
   
-  empirical_var[i] <- var(df_aggregated$mean_precip, na.rm = TRUE)
+  # Extract the variance of the block means for this specific scale
+  empirical_var[i] <- var(df_aggregated$mean_precip)
 }
 
 # --- 5. DEFINE ALTERNATIVE CAUCHY CLIMACOGRAM MODELS ---
@@ -83,7 +95,7 @@ climacogram_gen_cauchy <- function(k, params) {
 # Model 2: Hurst-Kolmogorov (HK) process
 climacogram_simple_cauchy <- function(k, params) {
   gamma_1 <- params[1]; alpha <- params[2]; H <- params[3]
-  gamma_1 * ( (alpha / k)) ^ (2 - 2*H)
+  gamma_1 * ( (alpha / k)) ^ (2- 2*H)
 }
 
 # Model 3: Hybrid Hurst-Kolmogorov (HHK) process
@@ -92,57 +104,119 @@ climacogram_short_cauchy <- function(k, params) {
   gamma_1 * ((1+(k/alpha)^(2*M)) ^ ((H - 1) / M))
 }
 
-# General Objective Function Wrapper with BIAS CORRECTION
-objective_function <- function(params, model_func, emp_k, emp_var, T_sc) {
-  # 1. Calculate Theoretical Variance at scale k
-  modeled_var <- model_func(emp_k, params)
-  
-  # 2. Calculate Theoretical Variance at total scale T
-  modeled_var_T <- model_func(T_sc, params)
-  
-  # 3. Calculate Bias Correction Factor (chi)
-  chi <- (1 - (modeled_var_T / modeled_var)) / (1 - (emp_k / T_sc))
-  
-  # 4. Calculate Expected Empirical Variance
-  expected_var <- chi * modeled_var
-  
-  # 5. Minimize sum of squared relative errors between Empirical and Expected
-  sum( ((emp_var - expected_var) / emp_var)^2, na.rm = TRUE )
+# General Objective Function Wrapper
+objective_function <- function(params, model_func) {
+  modeled_var <- model_func(empirical_k, params)
+  # Minimize sum of squared relative errors
+  sum( ((empirical_var - modeled_var) / empirical_var)^2 )
 }
 
 
+
 # --- 6. RUN OPTIMIZATION FOR ALL 3 ALTERNATIVE MODELS --- 
-guess_gamma_1 <- empirical_var[1] * 100
+ # We pRovide a stronger initial guess for 15-min variance (gamma_1)
+
+guess_gamma_1 <- empirical_var[1] *100
+
 
 # --- Fit Model 1: Cauchy-type climacogram ---
+
 init_1 <- c(gamma_1 = guess_gamma_1, alpha = 10, H = 0.5, M = 0.25)
 low_1  <- c(gamma_1 = 1e-6, alpha = 1e-3, H = 1e-3, M = 1e-3)
 up_1   <- c(gamma_1 = Inf,  alpha = 1000, H = 1.0-1e-3,  M = 1.0-1e-3)
 
 fit_1 <- optim(par = init_1, fn = objective_function, model_func = climacogram_gen_cauchy,
-               emp_k = empirical_k, emp_var = empirical_var, T_sc = T_scale,
                method = "L-BFGS-B", lower = low_1, upper = up_1, control = list(maxit=5000)) 
 
-# --- Fit Model 2: Hurst-Kolmogorov (HK) process ---
+
+ # --- Fit Model 2: Hurst-Kolmogorov (HK) process ---
+
 init_2 <- c(gamma_1 = guess_gamma_1, alpha = 10, H = 0.5)
 low_2  <- c(gamma_1 = 1e-6, alpha = 1e-3, H = 1e-3)
-up_2   <- c(gamma_1 = Inf,  alpha = 1000, H = 1.0-1e-3) # Prevent exact 1.0 to avoid zero division/inf
+up_2   <- c(gamma_1 = Inf,  alpha = 1000, H = 1.0)
 
 fit_2 <- optim(par = init_2, fn = objective_function, model_func = climacogram_simple_cauchy,
-               emp_k = empirical_k, emp_var = empirical_var, T_sc = T_scale,
                method = "L-BFGS-B", lower = low_2, upper = up_2, control = list(maxit=5000)) 
 
-# --- Fit Model 3: Hybrid Hurst-Kolmogorov (HHK) process ---
+
+
+ # --- Fit Model 3: Hybrid Hurst-Kolmogorov (HHK) process ---
+
 init_3 <- c(gamma_1 = guess_gamma_1, alpha = 10, H = 0.5, M = 0.25)
 low_3  <- c(gamma_1 = 1e-6, alpha = 1e-3, H = 1e-3, M = 1e-3)
 up_3   <- c(gamma_1 = Inf,  alpha = 1000, H = 1.0-1e-3,  M = 1.0-1e-3)
 
+
 fit_3 <- optim(par = init_3, fn = objective_function, model_func = climacogram_short_cauchy,
-               emp_k = empirical_k, emp_var = empirical_var, T_sc = T_scale,
                method = "L-BFGS-B", lower = low_3, upper = up_3, control = list(maxit=5000)) 
 
 
-# --- 7. EXTRAPOLATE TO 15-MIN VARIANCE ---
+# --- Fit Model 1: Cauchy-type climacogram ---
+# (Optimization code remains exactly the same...)
+var_15min_1 <- climacogram_gen_cauchy(1, fit_1$par)
+cat(sprintf("[1] Cauchy-type climacogram -> 15-min Var: %.4f \n", var_15min_1))
+
+# --- Fit Model 2: Hurst-Kolmogorov (HK) process ---
+# (Optimization code remains exactly the same...)
+var_15min_2 <- climacogram_simple_cauchy(1, fit_2$par)
+cat(sprintf("[2] Hurst-Kolmogorov (HK) process     -> 15-min Var: %.4f \n", var_15min_2))
+
+# --- Fit Model 3: Hybrid Hurst-Kolmogorov (HHK) process ---
+# (Optimization code remains exactly the same...)
+var_15min_3 <- climacogram_short_cauchy(1, fit_3$par)
+cat(sprintf("[3] Hybrid Hurst-Kolmogorov (HHK) process -> 15-min Var: %.4f \n", var_15min_3))
+
+
+# --- 6. RUN OPTIMIZATION --- 
+
+# Calculate T_total: The total length of your data in 15-minute intervals
+# If df has N daily rows, total 15-min intervals = N * 96
+T_total <- nrow(df) * intervals_per_day
+guess_gamma_1 <- empirical_var[1] 
+# Model 1 Initialization 
+init_1 <- c(gamma_1 = guess_gamma_1, alpha = 10, H = 0.5, M = 0.25)
+low_1  <- c(gamma_1 = 1e-6, alpha = 1e-3, H = 1e-3, M = 1e-3)
+up_1   <- c(gamma_1 = Inf,  alpha = 1000, H = 1.0-1e-3, M = 1.0-1e-3)
+
+fit_1 <- optim(par = init_1, fn = objective_function, 
+               model_func = climacogram_gen_cauchy,
+               empirical_var = empirical_var, 
+               empirical_k = empirical_k, 
+               T_total = T_total,
+               method = "L-BFGS-B", lower = low_1, upper = up_1, 
+               control = list(maxit=5000)) 
+
+# Model 2 Initialization (Note the change from gamma_1 to lambda)
+init_2 <- c(lambda = guess_gamma_1, alpha = 10, H = 0.5)
+low_2  <- c(lambda = 1e-6, alpha = 1e-3, H = 1e-3)
+up_2   <- c(lambda = Inf,  alpha = 1000, H = 1.0-1e-3)
+
+fit_2 <- optim(par = init_2, fn = objective_function, 
+               model_func = climacogram_simple_cauchy,
+               empirical_var = empirical_var, 
+               empirical_k = empirical_k, 
+               T_total = T_total,
+               method = "L-BFGS-B", lower = low_2, upper = up_2, 
+               control = list(maxit=5000)) 
+
+# Model 3 Initialization (Note the change from gamma_1 to lambda)
+init_3 <- c(lambda = guess_gamma_1, alpha = 10, H = 0.5, M = 0.25)
+low_3  <- c(lambda = 1e-6, alpha = 1e-3, H = 1e-3, M = 1e-3)
+up_3   <- c(lambda = Inf,  alpha = 1000, H = 1.0-1e-3, M = 1.0-1e-3)
+
+fit_3 <- optim(par = init_3, fn = objective_function, 
+               model_func = climacogram_short_cauchy,
+               empirical_var = empirical_var, 
+               empirical_k = empirical_k, 
+               T_total = T_total,
+               method = "L-BFGS-B", lower = low_3, upper = up_3, 
+               control = list(maxit=5000)) 
+
+
+# --- 7. EXTRACT AND DOWNSCALE ---
+
+# The downscaled variance at 15-min (k=1) uses the theoretical model directly, 
+# NOT the expected bias-corrected formula, because we want the true variance.
 var_15min_1 <- climacogram_gen_cauchy(1, fit_1$par)
 cat(sprintf("[1] Cauchy-type climacogram -> 15-min Var: %.4f \n", var_15min_1))
 
@@ -152,16 +226,16 @@ cat(sprintf("[2] Hurst-Kolmogorov (HK) process     -> 15-min Var: %.4f \n", var_
 var_15min_3 <- climacogram_short_cauchy(1, fit_3$par)
 cat(sprintf("[3] Hybrid Hurst-Kolmogorov (HHK) process -> 15-min Var: %.4f \n", var_15min_3))
 
+
 ```
 
 
 
-
-
-
-
-
 ```{r}
+
+
+
+
 
 
 
@@ -225,3 +299,9 @@ ggplot() +
     plot.title = element_text(face = "bold")
   )
 ```
+
+
+
+
+
+
