@@ -1,0 +1,169 @@
+```{r message=FALSE, warning=FALSE}
+library(dplyr)
+library(readxl)
+library(ggplot2)
+library(lubridate)
+library(DEoptim)
+library(lmomco)
+library(DEoptim)
+library(tidyr)
+```
+
+```{r}
+gdrive_path <- paste(LETTERS[file.exists(paste0(LETTERS, ":/My Drive"))],":/My Drive",sep = "")
+project_path <- file.path(gdrive_path,"Academic_git/DownScaling")
+generalData_path <- file.path(gdrive_path,"General_Data")
+```
+
+
+```{r}
+source("Downscale_P_Lm_fun.R")
+
+# Define your folder
+file_list <- list.files(file.path(generalData_path, "EL08"), pattern = "\\.txt$", full.names = TRUE)
+
+file_list <- file_list[
+  grep("agchialos|makrinitsa_YPEN_|spilia_YPEN_", file_list)
+]
+
+# 1. Run the function on all files in the list
+# (Using lapply to apply the function to each file path)
+results_list <- lapply(file_list, Lm_Pd_downscaleFun)
+
+# 2. Extract and combine the results into master dataframes
+all_estimates <- bind_rows(lapply(results_list, function(x) x$estimates))
+all_inspection <- bind_rows(lapply(results_list, function(x) x$inspection))
+all_params <- bind_rows(lapply(results_list, function(x) x$params))
+
+
+
+# Recreate the bounded model function for plotting
+bounded_model_plot <- function(k, p1, p2, p3) {
+  p1 ^ ((1 + (p2^(-1/p3) - 1) * (k - 1))^p3)
+}
+
+# Reshape the empirical data (inspection) to long format for ggplot
+inspection_long <- all_inspection %>%
+  pivot_longer(
+    cols = c(prob_dry, L_var_all, L_skew_all, L_var_pos, L_skew_pos),
+    names_to = "statistic",
+    values_to = "empirical_value"
+  )
+
+
+
+
+
+
+```
+
+
+
+
+```{r}
+# Recreate the bounded model function
+bounded_model_plot <- function(k, p1, p2, p3) {
+  p1 ^ ((1 + (p2^(-1/p3) - 1) * (k - 1))^p3)
+}
+
+# Define the custom plotting function
+plot_downscale_curve <- function(selected_station, selected_stat, all_estimates, all_inspection, all_params) {
+  
+  # 1. Map empirical statistic names to parameter prefixes
+  stat_map <- c(
+    "prob_dry" = "p_dry", 
+    "L_var_all" = "L_var_all",
+    "L_skew_all" = "L_skew_all", 
+    "L_var_pos" = "L_var_pos",
+    "L_skew_pos" = "L_skew_pos"
+  )
+  param_prefix <- stat_map[[selected_stat]]
+  
+  # 2. Filter empirical data for the selected station and statistic
+  emp_data <- all_inspection %>%
+    filter(station == selected_station) %>%
+    select(scale_days, empirical_value = all_of(selected_stat))
+  
+  # 3. Extract the 3 optimized parameters for this specific curve
+  station_params <- all_params %>% filter(Station == selected_station)
+  p1 <- station_params[[paste0(param_prefix, "_m_basic")]][1]
+  p2 <- station_params[[paste0(param_prefix, "_xi")]][1]
+  p3 <- station_params[[paste0(param_prefix, "_eta")]][1]
+  
+  # 4. Generate the continuous curve data (Log-spaced from 15 mins to 10 days)
+  intervals_per_day <- 96
+  min_days <- 1 / intervals_per_day
+  max_days <- max(emp_data$scale_days, na.rm = TRUE)
+  
+  day_seq <- exp(seq(log(min_days), log(max_days), length.out = 200))
+  k_seq <- day_seq * intervals_per_day
+  fitted_vals <- bounded_model_plot(k_seq, p1, p2, p3)
+  
+  curve_data <- data.frame(scale_days = day_seq, fitted_value = fitted_vals)
+  
+  # Split the curve into "Fitted" (>= 1 day) and "Downscaled" (< 1 day) 
+  # to match the paper's solid vs. dashed line aesthetics
+  curve_fitted <- curve_data %>% filter(scale_days >= 1)
+  curve_downscaled <- curve_data %>% filter(scale_days <= 1)
+  
+  # 5. Create the plot matching the paper's aesthetics
+  p <- ggplot() +
+    # Vertical grey dashed line separating downscaled vs fitted regions
+    geom_vline(xintercept = 1, linetype = "dashed", color = "darkgrey", linewidth = 0.8) +
+    
+    # Downscaled model (dashed black line)
+    geom_line(data = curve_downscaled, aes(x = scale_days, y = fitted_value), 
+              color = "black", linetype = "dashed", linewidth = 0.8) +
+              
+    # Fitted model (solid black line)
+    geom_line(data = curve_fitted, aes(x = scale_days, y = fitted_value), 
+              color = "black", linetype = "solid", linewidth = 0.8) +
+              
+    # Empirical data (orange points)
+    geom_point(data = emp_data, aes(x = scale_days, y = empirical_value), 
+               color = "#FFA500", size = 2.5, alpha = 0.9) +
+    
+    # X-Axis Log Scale with custom labels
+    scale_x_log10(
+      breaks = c(1/96, 1, 2, 5, 10),
+      labels = c("15m", "1", "2", "5", "10")
+    ) +
+    
+    # Labels and Titles (Including the parameters in the subtitle like the paper)
+    labs(
+      title = paste("Station:", selected_station, "| Statistic:", selected_stat),
+      subtitle = sprintf("Fitted model: p1 = %.3f, \u03BE = %.3f, \u03B7 = %.3f", p1, p2, p3),
+      x = "Scale (Days)",
+      y = selected_stat
+    ) +
+    
+    # Aesthetic adjustments to strictly mimic the paper
+    theme(
+      # The paper uses the default ggplot2 grey background
+      panel.background = element_rect(fill = "#EBEBEB", color = NA),
+      panel.grid.major = element_line(color = "white", linewidth = 0.5),
+      panel.grid.minor = element_blank(),
+      plot.title = element_text(size = 11, face = "bold"),
+      plot.subtitle = element_text(size = 9, color = "darkgrey"),
+      axis.title = element_text(size = 10)
+    )
+  
+  return(p)
+}
+
+
+
+# Example 1: Plotting L-skewness for a specific station
+plot_downscale_curve(
+  selected_station = "spilia_YPEN_.txt", # Replace with your exact filename
+  selected_stat = "L_skew_all", 
+  all_estimates = all_estimates, 
+  all_inspection = all_inspection, 
+  all_params = all_params
+)
+
+```
+
+
+
+

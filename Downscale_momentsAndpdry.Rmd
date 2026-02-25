@@ -1,0 +1,207 @@
+```{r message=FALSE, warning=FALSE}
+library(dplyr)
+library(readxl)
+library(ggplot2)
+library(lubridate)
+library(DEoptim)
+library(lmomco)
+library(DEoptim)
+```
+
+```{r}
+gdrive_path <- paste(LETTERS[file.exists(paste0(LETTERS, ":/My Drive"))],":/My Drive",sep = "")
+project_path <- file.path(gdrive_path,"Academic_git/DownScaling")
+generalData_path <- file.path(gdrive_path,"General_Data")
+```
+
+```{r}
+
+
+# --- 1 & 2. READ DATA AND DATES ---
+file_path <- file.path(generalData_path, "EL08/spilia_YPEN_.txt")
+df <- read.table(file_path, skip = 16, col.names = "precip")
+
+df$precip[df$precip == -999] <- NA
+
+header_lines <- readLines(file_path, n = 16)
+start_date_str <- sub("Start datetime: ", "", grep("^Start datetime:", header_lines, value = TRUE))
+end_date_str <- sub("End datetime: ", "", grep("^End datetime:", header_lines, value = TRUE))
+
+start_ts <- ymd(start_date_str)
+end_ts <- ymd(end_date_str)
+df$date <- seq(start_ts, end_ts, by = "day")
+
+# --- 3. CONVERT TO AVERAGED PROCESS ---
+intervals_per_day <- 96
+df$precip_rate <- df$precip / intervals_per_day
+df$day_index <- as.numeric(df$date - min(df$date)) 
+
+# --- 4. AGGREGATE, INSPECT, AND CALCULATE STATISTICS ---
+aggregation_days <- 1:10
+empirical_k <- aggregation_days * intervals_per_day 
+
+# Vectors for Probability of Dry
+empirical_p_dry <- numeric(length(aggregation_days))
+
+# Vectors for L-moments (ALL data, including zeros)
+empirical_L_var_all <- numeric(length(aggregation_days))
+empirical_L_skew_all <- numeric(length(aggregation_days))
+
+# Vectors for L-moments (POSITIVE data only)
+empirical_L_var_pos <- numeric(length(aggregation_days))
+empirical_L_skew_pos <- numeric(length(aggregation_days))
+
+# Create an empty list to store our inspection dataframes
+inspection_list <- list()
+
+for (i in seq_along(aggregation_days)) {
+  agg_length <- aggregation_days[i]
+  
+  # 1. Create the detailed inspection dataframe (Removed bin_sum_precip)
+  df_detailed <- df %>%
+    mutate(bin_id = day_index %/% agg_length) %>%
+    group_by(bin_id) %>%
+    mutate(
+      days_in_bin = n(),
+      bin_mean_precip = mean(precip_rate, na.rm = FALSE),
+      is_valid_bin = (!is.na(bin_mean_precip) & days_in_bin == agg_length)
+    ) %>%
+    ungroup()
+  
+  # 2. Save the dataframe to our list for later inspection
+  list_name <- paste0("scale_", agg_length, "d")
+  inspection_list[[list_name]] <- df_detailed
+  
+  # 3. Extract the clean vector of valid bins
+  valid_bins <- df_detailed %>%
+    filter(is_valid_bin) %>%
+    distinct(bin_id, bin_mean_precip)
+  
+  # 4. Calculate Probability of Dry (p_ND)
+  # Because precip is non-negative, mean == 0 is mathematically identical to sum == 0
+  prob_dry <- mean(valid_bins$bin_mean_precip == 0)
+  empirical_p_dry[i] <- prob_dry
+  
+  # 5. Calculate L-moments for ALL values (Including zeros)
+  if (nrow(valid_bins) > 3) {
+    l_moms_all <- lmoms(valid_bins$bin_mean_precip)
+    
+    # In lmomco, $ratios[2] is L-CV (tau_2) and $ratios[3] is L-skewness (tau_3)
+    empirical_L_var_all[i] <- l_moms_all$ratios[2]  
+    empirical_L_skew_all[i] <- l_moms_all$ratios[3] 
+  } else {
+    empirical_L_var_all[i] <- NA
+    empirical_L_skew_all[i] <- NA
+  }
+  
+  # 6. Filter for ONLY positive aggregated values
+  positive_bins <- valid_bins %>%
+    filter(bin_mean_precip > 0)
+  
+  # 7. Calculate L-moments for POSITIVE values only
+  if (nrow(positive_bins) > 3) {
+    l_moms_pos <- lmoms(positive_bins$bin_mean_precip)
+    
+    empirical_L_var_pos[i] <- l_moms_pos$ratios[2]  
+    empirical_L_skew_pos[i] <- l_moms_pos$ratios[3] 
+  } else {
+    empirical_L_var_pos[i] <- NA
+    empirical_L_skew_pos[i] <- NA
+  }
+}
+
+# --- 5. RESULTS SUMMARY ---
+results <- data.frame(
+  scale_days = aggregation_days,
+  scale_k = empirical_k,
+  prob_dry = empirical_p_dry,
+  L_variation_all = empirical_L_var_all,
+  L_skewness_all = empirical_L_skew_all,
+  L_variation_pos = empirical_L_var_pos,
+  L_skewness_pos = empirical_L_skew_pos
+)
+```
+
+
+```{r}
+
+
+# --- 1. DEFINE THE BOUNDED STATISTIC MODEL ---
+# Equation 7 from Kossieris et al. (2021)
+bounded_model <- function(k, params) {
+  # params = c(m_basic, xi, eta)
+  m_basic <- params[1]  # The statistic at the basic scale (k=1)
+  xi <- params[2]       # Shape parameter [0, 1]
+  eta <- params[3]      # Shape parameter [0, 1]
+  
+  # Calculate modeled statistic across scales k
+  m_basic ^ ((1 + (xi^(-1/eta) - 1) * (k - 1))^eta)
+}
+
+# --- 2. DEFINE THE OBJECTIVE FUNCTION ---
+# Using Absolute Error (SSE) instead of Relative Error for bounded statistics
+objective_bounded <- function(params, empirical_k, empirical_stat) {
+  modeled_stat <- bounded_model(empirical_k, params)
+  
+  # Minimize the sum of squared absolute differences
+  sum( (1 - (modeled_stat/empirical_stat))^2, na.rm = TRUE )
+}
+
+# --- 3. RUN DEoptim FOR EACH STATISTIC ---
+
+# Extract the empirical values from the updated 'results' dataframe
+# We remove any NAs across all 5 statistical columns
+valid_idx <- !is.na(results$prob_dry) & 
+             !is.na(results$L_variation_all) & !is.na(results$L_skewness_all) &
+             !is.na(results$L_variation_pos) & !is.na(results$L_skewness_pos)
+
+fit_k          <- results$scale_k[valid_idx]
+fit_p_dry      <- results$prob_dry[valid_idx]
+fit_L_var_all  <- results$L_variation_all[valid_idx]
+fit_L_skew_all <- results$L_skewness_all[valid_idx]
+fit_L_var_pos  <- results$L_variation_pos[valid_idx]
+fit_L_skew_pos <- results$L_skewness_pos[valid_idx]
+
+# Parameter Bounds:
+# params[1] (m_basic): Must be in [1e-6, 1]. For positive random variables, tau_2 and tau_3 vary in [0, 1].
+# params[2] (xi): Must be in [1e-6, 1]
+# params[3] (eta): Must be in [1e-6, 1]
+low_bounds <- c(1e-6, 1e-6, 1e-6)
+up_bounds  <- c(1.0, 1.0, 1.0)
+
+# A wrapper for DEoptim to keep the code clean
+run_bounded_optimization <- function(empirical_stat, stat_name) {
+  cat(sprintf("Optimizing %s with DEoptim...\n", stat_name))
+  
+  # Define a specialized objective function wrapper that passes the specific empirical data
+  obj_fn <- function(p) objective_bounded(p, fit_k, empirical_stat)
+  
+  fit <- DEoptim(
+    fn = obj_fn, 
+    lower = low_bounds, 
+    upper = up_bounds, 
+    control = DEoptim.control(itermax = 1000, trace = FALSE)
+  )
+  
+  return(fit$optim$bestmem)
+}
+
+# Fit the 5 statistics
+best_params_pdry      <- run_bounded_optimization(fit_p_dry, "Probability of Dry")
+best_params_Lvar_all  <- run_bounded_optimization(fit_L_var_all, "L-Variation (All Data)")
+best_params_Lskew_all <- run_bounded_optimization(fit_L_skew_all, "L-Skewness (All Data)")
+best_params_Lvar_pos  <- run_bounded_optimization(fit_L_var_pos, "L-Variation (Positive Only)")
+best_params_Lskew_pos <- run_bounded_optimization(fit_L_skew_pos, "L-Skewness (Positive Only)")
+
+
+# --- 4. EXTRAPOLATE TO 15-MIN SCALE (k=1) ---
+# When k=1, the exponent reduces to 1, leaving m_basic as the exact downscaled estimate.
+
+cat("\n--- DOWNSCALED 15-MIN (k=1) ESTIMATES ---\n")
+cat(sprintf("Probability of Dry (p_ND)      : %.4f\n", best_params_pdry[1]))
+cat(sprintf("L-Variation (tau_2) [All]      : %.4f\n", best_params_Lvar_all[1]))
+cat(sprintf("L-Skewness (tau_3)  [All]      : %.4f\n", best_params_Lskew_all[1]))
+cat(sprintf("L-Variation (tau_2) [Positive] : %.4f\n", best_params_Lvar_pos[1]))
+cat(sprintf("L-Skewness (tau_3)  [Positive] : %.4f\n", best_params_Lskew_pos[1]))
+```
+

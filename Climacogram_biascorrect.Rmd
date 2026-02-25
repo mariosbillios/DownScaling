@@ -3,6 +3,7 @@ library(dplyr)
 library(readxl)
 library(ggplot2)
 library(lubridate)
+library(DEoptim)
 ```
 
 
@@ -21,19 +22,15 @@ generalData_path <- file.path(gdrive_path,"General_Data")
 library(dplyr)
 library(lubridate)
 
-# --- 1 & 2. READ THE DATA AND DATES ---
-file_path <- file.path(generalData_path,"EL08/volos_NOA_.txt")
+# --- 1 & 2. READ DATA AND DATES (Same as before) ---
+file_path <- file.path(generalData_path, "EL08/makrinitsa_YPEN_.txt")
 df <- read.table(file_path, skip = 16, col.names = "precip")
 
-# Clean NAs
 df$precip[df$precip == -999] <- NA
 
-# Extract dates dynamically from header
 header_lines <- readLines(file_path, n = 16)
-start_line <- grep("^Start datetime:", header_lines, value = TRUE)
-start_date_str <- sub("Start datetime: ", "", start_line)
-end_line <- grep("^End datetime:", header_lines, value = TRUE)
-end_date_str <- sub("End datetime: ", "", end_line)
+start_date_str <- sub("Start datetime: ", "", grep("^Start datetime:", header_lines, value = TRUE))
+end_date_str <- sub("End datetime: ", "", grep("^End datetime:", header_lines, value = TRUE))
 
 start_ts <- ymd(start_date_str)
 end_ts <- ymd(end_date_str)
@@ -42,30 +39,75 @@ df$date <- seq(start_ts, end_ts, by = "day")
 # --- 3. CONVERT TO AVERAGED PROCESS ---
 intervals_per_day <- 96
 df$precip_rate <- df$precip / intervals_per_day
+df$day_index <- as.numeric(df$date - min(df$date)) 
 
-# --- 4. CALCULATE VARIANCES ACROSS MULTIPLE SCALES ---
-aggregation_days <- c(1:10)
+# --- 4. AGGREGATE, INSPECT, AND CALCULATE VARIANCE ---
+aggregation_days <- 1:10
 empirical_k <- aggregation_days * intervals_per_day 
 empirical_var <- numeric(length(aggregation_days))
+
+# Create an empty list to store our inspection dataframes
+inspection_list <- list()
 
 for (i in seq_along(aggregation_days)) {
   agg_length <- aggregation_days[i]
   
-  df_aggregated <- df %>%
+  # 1. Create the detailed inspection dataframe
+  df_detailed <- df %>%
+    mutate(bin_id = day_index %/% agg_length) %>%
+    group_by(bin_id) %>%
     mutate(
-      cal_year = year(date),
-      bin_in_year = (yday(date) - 1) %/% agg_length
-    ) %>%
-    group_by(cal_year, bin_in_year) %>%
-    summarise(
       days_in_bin = n(),
-      mean_precip = mean(precip_rate, na.rm = FALSE),
-      .groups = "drop"
+      bin_mean_precip = mean(precip_rate, na.rm = FALSE),
+      is_valid_bin = (!is.na(bin_mean_precip) & days_in_bin == agg_length)
     ) %>%
-    filter(!is.na(mean_precip) & days_in_bin == agg_length)
+    ungroup()
   
-  empirical_var[i] <- var(df_aggregated$mean_precip, na.rm = TRUE)
+  # 2. Save the dataframe to our list for later inspection
+  list_name <- paste0("scale_", agg_length, "d")
+  inspection_list[[list_name]] <- df_detailed
+  
+  # 3. Extract the clean vector of valid bin means
+  valid_bins <- df_detailed %>%
+    filter(is_valid_bin) %>%
+    distinct(bin_id, bin_mean_precip)
+  
+  # --- MANUAL VARIANCE CALCULATION ---
+  X <- valid_bins$bin_mean_precip
+  X <- X[!is.na(X)] # ensure no NAs slipped through
+  n <- length(X)
+  
+  if (n > 1) {
+    X_bar <- mean(X)
+    # Applying: S^2 = Sum(X_i - X_bar)^2 / (n - 1)
+    manual_variance <- sum((X - X_bar)^2) / (n - 1) 
+  } else {
+    manual_variance <- NA # Variance is undefined for a sample size of 1 or 0
+  }
+  
+  empirical_var[i] <- manual_variance
 }
+
+
+# a<-inspection_list$scale_3d %>%
+#   group_by(bin_id) %>%
+#   summarise(common_value = unique(bin_mean_precip))
+# var(a$common_value,na.rm = TRUE)
+
+
+
+
+
+# --- 5. RESULTS SUMMARY ---
+results <- data.frame(
+  scale_days = aggregation_days,
+  scale_k = empirical_k,
+  variance = empirical_var
+)
+
+
+
+
 
 # --- 5. DEFINE CLIMACOGRAM MODELS ---
 
@@ -82,67 +124,109 @@ climacogram_HHK <- function(k, params) {
 }
 
 
-# --- 6. EXPLICIT OBJECTIVE FUNCTIONS  ---
+# --- Define Total Length T for Bias Correction ---
+# T must be in the same units as empirical_k (15-min intervals)
+T_length <- nrow(df) * intervals_per_day
+# --- 6. EXPLICIT OBJECTIVE FUNCTIONS (BIAS-CORRECTED) ---
 
 # Objective function specific to the HK model
 objective_HK <- function(params) {
-  # Calculate Theoretical Variances
-  modeled_var <- climacogram_HK(empirical_k, params)
+  # 1. Calculate True Theoretical Variance at scale k
+  gamma_k <- climacogram_HK(empirical_k, params)
   
-  # Minimize relative error between empirical and theoretical
-  sum( ((empirical_var - modeled_var) / empirical_var)^2, na.rm = TRUE )
+  # 2. Calculate True Theoretical Variance at the maximum scale T
+  gamma_T <- climacogram_HK(T_length, params)
+  
+  # 3. Calculate the bias correction factor chi(k, T)
+  chi_k_T <- (1 - (gamma_T / gamma_k)) / (1 - (empirical_k / T_length))
+  
+  # 4. Calculate the Expected Empirical Variance
+  expected_var <- chi_k_T * gamma_k
+  
+  # 5. Minimize relative error between the ACTUAL empirical and EXPECTED empirical
+  sum( ((empirical_var - expected_var) / empirical_var)^2, na.rm = TRUE )
 }
 
 # Objective function specific to the HHK model
 objective_HHK <- function(params) {
-  # Calculate Theoretical Variances
-  modeled_var <- climacogram_HHK(empirical_k, params)
+  # 1. Calculate True Theoretical Variance at scale k
+  gamma_k <- climacogram_HHK(empirical_k, params)
   
-  # Minimize relative error between empirical and theoretical
-  sum( ((empirical_var - modeled_var) / empirical_var)^2, na.rm = TRUE )
+  # 2. Calculate True Theoretical Variance at the maximum scale T
+  gamma_T <- climacogram_HHK(T_length, params)
+  
+  # 3. Calculate the bias correction factor chi(k, T)
+  chi_k_T <- (1 - (gamma_T / gamma_k)) / (1 - (empirical_k / T_length))
+  
+  # 4. Calculate the Expected Empirical Variance
+  expected_var <- chi_k_T * gamma_k
+  
+  # 5. Minimize relative error between the ACTUAL empirical and EXPECTED empirical
+  sum( ((empirical_var - expected_var) / empirical_var)^2, na.rm = TRUE )
 }
 
 
 # --- 7. RUN OPTIMIZATION --- 
-guess_lambda <- 3
+
+# Note: DEoptim requires strictly finite bounds. 
+# Replaced lambda = Inf with lambda = 10000 (adjust if your variance scale is larger)
 
 # Fit Model 1: HK process
-init_HK <- c(lambda = guess_lambda, alpha = 10, H = 0.5)
 low_HK  <- c(lambda = 1e-6, alpha = 1e-3, H = 1e-3)
-up_HK   <- c(lambda = Inf,  alpha = 1000, H = 1.0-1e-3)
+up_HK   <- c(lambda = 10000, alpha = 1000, H = 1.0 - 1e-3)
 
-fit_HK <- optim(par = init_HK, fn = objective_HK,
-                method = "L-BFGS-B", lower = low_HK, upper = up_HK, 
-                control = list(maxit=5000)) 
+# DEoptim control parameters: 
+# itermax sets max generations. trace = FALSE keeps the console clean.
+cat("Optimizing HK Model with DEoptim...\n")
+fit_HK <- DEoptim(
+  fn = objective_HK, 
+  lower = low_HK, 
+  upper = up_HK, 
+  control = DEoptim.control(itermax = 1000, trace = FALSE)
+)
 
 # Fit Model 2: HHK process
-init_HHK <- c(lambda = guess_lambda, alpha = 10, H = 0.5, M = 0.25)
 low_HHK  <- c(lambda = 1e-6, alpha = 1e-3, H = 1e-3, M = 1e-3)
-up_HHK   <- c(lambda = Inf,  alpha = 1000, H = 1.0-1e-3,  M = 1.0-1e-3)
+up_HHK   <- c(lambda = 10000, alpha = 1000, H = 1.0 ,  M = 1.0 )
 
-fit_HHK <- optim(par = init_HHK, fn = objective_HHK,
-                 method = "L-BFGS-B", lower = low_HHK, upper = up_HHK, 
-                 control = list(maxit=5000)) 
+cat("Optimizing HHK Model with DEoptim...\n")
+fit_HHK <- DEoptim(
+  fn = objective_HHK, 
+  lower = low_HHK, 
+  upper = up_HHK,  
+  control = DEoptim.control(itermax = 1000, trace = FALSE)
+)
 
 
 # --- 8. EXTRAPOLATE TO 15-MIN VARIANCE (k = 1) ---
-var_15min_HK <- climacogram_HK(1, fit_HK$par)
-cat(sprintf("[1] Hurst-Kolmogorov (HK) process     -> 15-min Var: %.4f \n", var_15min_HK))
 
-var_15min_HHK <- climacogram_HHK(1, fit_HHK$par)
-cat(sprintf("[2] Hybrid Hurst-Kolmogorov (HHK) process -> 15-min Var: %.4f \n", var_15min_HHK))
+# In DEoptim, the best parameter vector is stored in $optim$bestmem
+best_params_HK <- fit_HK$optim$bestmem
+var_15min_HK <- climacogram_HK(1, best_params_HK)
+
+cat(sprintf("\n[1] Hurst-Kolmogorov (HK) process\n"))
+cat(sprintf("    Optimized Params: lambda=%.4f, alpha=%.4f, H=%.4f\n", 
+            best_params_HK[1], best_params_HK[2], best_params_HK[3]))
+cat(sprintf("    -> 15-min Var: %.4f \n\n", var_15min_HK))
 
 
+best_params_HHK <- fit_HHK$optim$bestmem
+var_15min_HHK <- climacogram_HHK(1, best_params_HHK)
+
+cat(sprintf("[2] Hybrid Hurst-Kolmogorov (HHK) process\n"))
+cat(sprintf("    Optimized Params: lambda=%.4f, alpha=%.4f, H=%.4f, M=%.4f\n", 
+            best_params_HHK[1], best_params_HHK[2], best_params_HHK[3], best_params_HHK[4]))
+cat(sprintf("    -> 15-min Var: %.4f \n", var_15min_HHK))
 
 ```
 
 
 
+
+
+
 ```{r}
 
-
-
-library(ggplot2)
 
 # --- 1. PREPARE THE DATA FOR PLOTTING ---
 # Empirical data points (from your aggregated coarse scales)
@@ -154,13 +238,17 @@ df_empirical <- data.frame(
 # Generate a continuous sequence of k values (from 15-min up to your max empirical scale)
 k_seq <- exp(seq(log(1), log(max(empirical_k)), length.out = 200))
 
+# FIX 1: Extract parameters using $optim$bestmem for DEoptim
+params_HK <- fit_HK$optim$bestmem
+params_HHK <- fit_HHK$optim$bestmem
+
 # Create a combined dataframe for the 2 fitted model lines
 df_lines <- rbind(
   data.frame(k = k_seq, 
-             variance = climacogram_HK(k_seq, fit_HK$par), 
+             variance = climacogram_HK(k_seq, params_HK), 
              Model = "1. Hurst-Kolmogorov (HK) process"),
   data.frame(k = k_seq, 
-             variance = climacogram_HHK(k_seq, fit_HHK$par), 
+             variance = climacogram_HHK(k_seq, params_HHK), 
              Model = "2. Hybrid Hurst-Kolmogorov (HHK) process")
 ) 
 
@@ -177,16 +265,17 @@ ggplot() +
   geom_point(data = df_downscaled, aes(x = k, y = variance, color = Model), size = 5, shape = 18) +
   geom_point(data = df_empirical, aes(x = k, y = variance), color = "black", size = 3) +
   
-  # FIX: Make sure BOTH axes are logarithmic
+  # FIX 2: Applied scale_y_log10() alongside scale_x_log10()
   scale_x_log10(breaks = c(1, 96, 96*10, 96*30),
                 labels = c("15-min\n(k=1)", "1 Day\n(k=96)", "10 Days", "30 Days")) +
+  scale_y_log10() +
   
   scale_color_brewer(palette = "Set1") +
   labs(
     title = "Comparison of 15-min Variance Downscaling",
-    subtitle = "Evaluating HK and HHK climacogram models",
+    subtitle = "Evaluating HK and HHK climacogram models on a Log-Log scale",
     x = "Scale k (number of 15-min intervals)",
-    y = "Variance (Log Scale)",
+    y = "Variance",
     color = "Fitted Models",
     linetype = "Fitted Models"
   ) +
@@ -198,6 +287,15 @@ ggplot() +
     plot.title = element_text(face = "bold")
   )
 ```
+
+
+
+
+
+
+
+
+
 
 
 
