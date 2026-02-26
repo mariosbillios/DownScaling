@@ -121,11 +121,11 @@ results <- data.frame(
   L_skewness_pos = empirical_L_skew_pos
 )
 
-valid_bins <- inspection_list$scale_1d %>%
-    filter(is_valid_bin) %>%
-    distinct(bin_id, bin_mean_precip)
-
-var(valid_bins$bin_mean_precip)
+# valid_bins <- inspection_list$scale_1d %>%
+#     filter(is_valid_bin) %>%
+#     distinct(bin_id, bin_mean_precip)
+# 
+# var(valid_bins$bin_mean_precip)
 
 
 ```
@@ -212,4 +212,55 @@ cat(sprintf("L-Skewness (tau_3)  [All]      : %.4f\n", best_params_Lskew_all[1])
 cat(sprintf("L-Variation (tau_2) [Positive] : %.4f\n", best_params_Lvar_pos[1]))
 cat(sprintf("L-Skewness (tau_3)  [Positive] : %.4f\n", best_params_Lskew_pos[1]))
 ```
+
+
+```{r}
+# 1. Define the components for cleaner code
+p0 <- results$prob_dry
+p1 <- 1 - p0
+tau2_pos <- results$L_variation_pos
+tau3_pos <- results$L_skewness_pos
+
+# 2. Calculate Expected L-variation (Equation 1)
+results$expected_L_var_all <- p0 + (p1 * tau2_pos)
+
+# 3. Calculate Expected L-skewness (Equation 2)
+numerator <- (tau2_pos * (p1^2) * tau3_pos) + (3 * p0 * p1 * tau2_pos) + (2 * (p0^2)) - p0
+denominator <- (p1 * tau2_pos) + p0 
+results$expected_L_skew_all <- numerator / denominator
+
+# 4. Calculate the differences (Residuals)
+results$diff_tau2 <- results$L_variation_all - results$expected_L_var_all
+results$diff_tau3 <- results$L_skewness_all - results$expected_L_skew_all
+
+# 5. View the comparison
+print(results[, c("L_variation_all", "expected_L_var_all", "diff_tau2")])
+```
+
+
+```{r}
+# 1. Define the components using the overall metrics
+p0 <- results$prob_dry
+tau2_all <- results$L_variation_all
+tau3_all <- results$L_skewness_all
+
+# 2. Calculate Expected L-variation for the positive part (Equation 1)
+results$expected_L_var_pos <- (tau2_all - p0) / (1 - p0)
+
+# 3. Calculate Expected L-skewness for the positive part (Equation 2)
+numerator_pos <- (tau3_all * tau2_all) - (3 * p0 * tau2_all) + (p0^2) + p0
+denominator_pos <- (1 - p0) * (tau2_all - p0)
+results$expected_L_skew_pos <- numerator_pos / denominator_pos
+
+# 4. Calculate the differences (Residuals)
+results$diff_tau2_pos <- results$L_variation_pos - results$expected_L_var_pos
+results$diff_tau3_pos <- results$L_skewness_pos - results$expected_L_skew_pos
+
+# 5. View the comparison
+print(results[, c("L_variation_pos", "expected_L_var_pos", "diff_tau2_pos")])
+print(results[, c("L_skewness_pos", "expected_L_skew_pos", "diff_tau3_pos")])
+
+
+```
+
 
