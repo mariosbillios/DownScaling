@@ -51,11 +51,8 @@ mse_W_1p <- function(par, k, y, k_star, q_k_star) mean((y - H_W_1p_pdry(k, k_sta
 mse_L_1p <- function(par, k, y, k_star, q_k_star) mean((y - H_L_1p_pdry(k, k_star, q_k_star, par[1]))^2, na.rm=TRUE)
 
 # -- Metric Functions --
-calculate_mape <- function(actual, predicted) {
- error_terms <- ifelse(actual == 0,
-                       ifelse(predicted == 0, 0, NA), 
-                       abs((actual - predicted) / actual))
- mean(error_terms, na.rm = TRUE) * 100
+calculate_mse <- function(actual, predicted) {
+ mean((actual - predicted)^2, na.rm = TRUE)
 }
 
 # =====================================================================
@@ -207,10 +204,10 @@ for (current_station_file in station_files) {
  all_fits_list <- list()
  de_ctrl <- DEoptim.control(
   trace = FALSE, 
-  itermax = 2000,   # Increased from 500 
-  NP = 200,          # Larger population for a more thorough search
-  reltol = 1e-8,    # Tighter tolerance for better precision
-  steptol = 200     # Number of steps to wait for improvement
+  itermax = 5000,   # Increased from 500 
+  NP = 500,          # Larger population for a more thorough search
+  reltol = 1e-11,    # Tighter tolerance for better precision
+  steptol = 500     # Number of steps to wait for improvement
  )
  
  for (stat in stats_to_fit) {
@@ -238,10 +235,10 @@ for (current_station_file in station_files) {
   )
   
   if (stat == "p_zero") {
-   fit_W_1p <- DEoptim(mse_W_1p, lower = 1e-6, upper = 1000, 
+   fit_W_1p <- DEoptim(mse_W_1p, lower = 1e-6, upper = 10, 
                        k = k_obs, y = y_obs, k_star = k_star, q_k_star = q_k_star, control = de_ctrl)
    
-   fit_L_1p <- DEoptim(mse_L_1p, lower = 1e-6, upper = 1000, 
+   fit_L_1p <- DEoptim(mse_L_1p, lower = 1e-6, upper = 10, 
                        k = k_obs, y = y_obs, k_star = k_star, q_k_star = q_k_star, control = de_ctrl)
    
    res_1p <- data.frame(
@@ -278,7 +275,7 @@ for (current_station_file in station_files) {
   q_k_star_val <- empirical_24h[[stat]]
   
   if (all(is.na(actual_vals))) {
-   current_fit$MAPE_validation <- NA
+   current_fit$mse_validation <- NA
    validation_results_list[[i]] <- current_fit
    next
   }
@@ -290,7 +287,7 @@ for (current_station_file in station_files) {
                            "PowerLaw_1p" = H_L_1p_pdry(k_val, k_star, q_k_star_val, b_val),
                            rep(NA, length(k_val)))
   
-  current_fit$MAPE_validation <- calculate_mape(actual_vals, predicted_vals)
+  current_fit$mse_validation <- calculate_mse(actual_vals, predicted_vals)
   validation_results_list[[i]] <- current_fit
  }
  
@@ -298,7 +295,7 @@ for (current_station_file in station_files) {
  
  best_models <- final_evaluated_models %>%
   group_by(Statistic) %>%
-  slice_min(order_by = MAPE_validation, n = 1) %>%
+  slice_min(order_by = mse_validation, n = 1) %>%
   ungroup()
  
  # --- Generate All Predictions ---
@@ -347,3 +344,29 @@ for (current_station_file in station_files) {
  cat("Successfully exported results for:", station_name, "\n")
  
 } # End of the for loop
+
+
+
+# 1. Filter the data for 'p_zero' and scales 1 to 23
+subset_data <- all_predictions[all_predictions$Statistic == "p_zero" & 
+                                all_predictions$Scale_k >= 1 & 
+                                all_predictions$Scale_k <= 23, ]
+
+# 2. Calculate MSE for Weibull_2p
+mse_weibull_2p <- mean((subset_data$Actual - subset_data$Weibull_2p)^2, na.rm = TRUE)
+
+# 3. Calculate MSE for Weibull_1p
+mse_weibull_1p <- mean((subset_data$Actual - subset_data$Weibull_1p)^2, na.rm = TRUE)
+
+# Display Results
+cat("MSE Weibull_2p:", mse_weibull_2p, "\n")
+cat("MSE Weibull_1p:", mse_weibull_1p, "\n")
+
+
+
+
+
+
+
+
+
