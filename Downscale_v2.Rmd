@@ -1,0 +1,523 @@
+```{r message=FALSE, warning=FALSE}
+library(dplyr)
+library(readxl)
+library(ggplot2)
+library(lubridate)
+library(DEoptim)
+library(lmomco)
+library(DEoptim)
+```
+
+
+```{r}
+gdrive_path <- paste(LETTERS[file.exists(paste0(LETTERS, ":/My Drive"))],":/My Drive",sep = "")
+project_path <- file.path(gdrive_path,"Academic_git/DownScaling")
+generalData_path <- file.path(gdrive_path,"General_Data")
+```
+
+
+```{r}
+
+# --- 1 & 2. READ DATA AND DATES ---
+file_path <- file.path(generalData_path, "/GSDR/QC_d data - Germany/DE_00003.txt")
+df <- read.table(file_path, skip =21, col.names = "precip")
+
+df$precip[df$precip == -999] <- NA
+
+
+header_lines <- readLines(file_path, n = 21)
+start_date_str <- sub("Start datetime: ", "", grep("^Start datetime:", header_lines, value = TRUE))
+end_date_str <- sub("End datetime: ", "", grep("^End datetime:", header_lines, value = TRUE))
+
+
+start_ts <- ymd_h(start_date_str)
+end_ts <- ymd_h(end_date_str)
+df$date <- seq(start_ts, end_ts, by = "hour")
+
+
+# --- 3. CONVERT TO AVERAGED PROCESS ---
+#We have hourly data and we want to extrapolate to 15 mins.
+#The 15 mins are scale k=1 so hourly data k=4
+#Base_time_chunks = 15 mins
+#The daily data are a sum of 4 base time chunks (=15 mins) so we need to make them in an average process. Divide by 4
+
+
+Base_time_chunks_per_hour <- 4
+df$precip_rate <- df$precip / Base_time_chunks_per_hour
+df$hour_index <- 0:(nrow(df) - 1)
+
+# --- 4. AGGREGATE ---
+# I  will fit the data  in the empirical data coming from 1 to 10 days mean aggregation 
+# T will validate the fitted curve in the empirical data from 1 to 12 hours
+# However i have daily data. The aggregation needs to be in that scale 
+
+empirical_k_training <- seq(1:10)*24* Base_time_chunks_per_hour
+empirical_k_validation <- seq(1:23) * Base_time_chunks_per_hour
+all_k<-c(empirical_k_validation,empirical_k_training)
+
+
+# Create an empty list to store our inspection dataframes
+inspection_list <- list()
+
+for (i in seq_along(all_k)) {
+ 
+
+ # I have hourly data. The aggregation needs to be in that scale. Meaning
+ # if i want the scale k=8 (4*8= 48mins =2 days) i need to aggregate the
+ # hourly data by 2. Thats why i divide by 4 so the aggregation length to be in hours 
+
+  agg_length <-all_k[i]/Base_time_chunks_per_hour
+
+
+  df_detailed <- df %>%
+    mutate(bin_id = hour_index %/% agg_length) %>%
+    group_by(bin_id) %>%
+    mutate(
+      hours_in_bin = n(),
+      bin_mean_precip = mean(precip_rate, na.rm = FALSE),
+      is_valid_bin = (!is.na(bin_mean_precip) & hours_in_bin == agg_length)
+    ) %>%
+    ungroup()
+  
+  # Save the dataframe to our list for later inspection
+  list_name <- paste0("scale_", agg_length, "Hours")
+  inspection_list[[list_name]] <- df_detailed
+  
+}
+
+
+clean_bins_list <- list()
+
+for (scale_name in names(inspection_list)) {
+  
+  df_detailed <- inspection_list[[scale_name]]
+  
+  valid_bins <- df_detailed %>%
+    filter(is_valid_bin) %>%
+    group_by(bin_id) %>%
+    summarise(
+      agg_date = min(date),
+      bin_mean_precip = first(bin_mean_precip), #
+      .groups = "drop"
+    )
+  
+  clean_bins_list[[scale_name]] <- valid_bins
+}
+
+
+
+
+```
+
+
+```{r}
+
+# Create an empty list to temporarily hold the summary rows
+summary_stats_list <- list()
+
+for (scale_name in names(clean_bins_list)) {
+  
+  # Extract the precipitation data for the current scale
+  df_clean <- clean_bins_list[[scale_name]]
+  x_all <- df_clean$bin_mean_precip
+  
+  # Filter for strictly positive rainfall
+  x_pos <- x_all[x_all > 0]
+  
+  # --- 1. Probability of Zero Rainfall ---
+  p_zero <- sum(x_all == 0) / length(x_all)
+  
+  # --- 2. Mean and Variance ---
+  mean_all <- mean(x_all, na.rm = TRUE)
+  var_all  <- var(x_all, na.rm = TRUE)
+  
+  mean_pos <- ifelse(length(x_pos) > 0, mean(x_pos, na.rm = TRUE), NA)
+  var_pos  <- ifelse(length(x_pos) > 1, var(x_pos, na.rm = TRUE), NA)
+  
+  # --- 3. L-moments for ALL data ---
+  # Check if we have at least 4 data points to calculate up to the 4th ratio
+  if (length(x_all) >= 4) {
+    lm_all <- lmoms(x_all)
+    l1_all <- lm_all$lambdas[1]
+    l2_all <- lm_all$lambdas[2]
+    l3_all <- lm_all$lambdas[3]
+    t2_all <- lm_all$ratios[2]
+    t3_all <- lm_all$ratios[3]
+    t4_all <- lm_all$ratios[4]
+  } else {
+    l1_all <- l2_all <- l3_all <- t1_all <- t2_all <- t3_all <- t4_all <- NA
+  }
+  
+  # --- 4. L-moments for POSITIVE data ---
+  if (length(x_pos) >= 4) {
+    lm_pos <- lmoms(x_pos)
+    l1_pos <- lm_pos$lambdas[1]
+    l2_pos <- lm_pos$lambdas[2]
+    l3_pos <- lm_pos$lambdas[3]
+    t2_pos <- lm_pos$ratios[2]
+    t3_pos <- lm_pos$ratios[3]
+    t4_pos <- lm_pos$ratios[4]
+  } else {
+    l1_pos <- l2_pos <- l3_pos <- t1_pos <- t2_pos <- t3_pos <- t4_pos <- NA
+  }
+  
+  # --- 5. Combine into a single row ---
+  scale_summary <- data.frame(
+    scale = scale_name,
+    p_zero = p_zero,
+    
+    # All Data Stats
+    mean_all = mean_all, var_all = var_all,
+    l1_all = l1_all, l2_all = l2_all, l3_all = l3_all, t2_all = t2_all, t3_all = t3_all, t4_all = t4_all,
+    
+    # Positive Data Stats
+    mean_pos = mean_pos, var_pos = var_pos,
+    l1_pos = l1_pos, l2_pos = l2_pos, l3_pos = l3_pos, t2_pos = t2_pos, t3_pos = t3_pos, t4_pos = t4_pos
+  )
+  
+  # Store the row in our list
+  summary_stats_list[[scale_name]] <- scale_summary
+}
+
+# Bind everything together into one tidy dataframe
+final_summary_df <- bind_rows(summary_stats_list)
+```
+
+
+
+```{r}
+# Extract numeric hours and filter for >= 24h
+final_summary_df <- final_summary_df %>%
+  mutate(k_hours = as.numeric(gsub("[^0-9.]", "", scale)))
+
+fit_data <- final_summary_df %>% filter(k_hours >= 24) %>% arrange(k_hours)
+
+
+mse_W_2p <- function(par, k, y, k_star, q_k_star) mean((y - H_W_2p(k, par[1], k_star, q_k_star, par[2]))^2, na.rm=TRUE)
+mse_L_2p <- function(par, k, y, k_star, q_k_star) mean((y - H_L_2p(k, par[1], k_star, q_k_star, par[2]))^2, na.rm=TRUE)
+
+mse_W_1p <- function(par, k, y, k_star, q_k_star) mean((y - H_W_1p_pdry(k, k_star, q_k_star, par[1]))^2, na.rm=TRUE)
+mse_L_1p <- function(par, k, y, k_star, q_k_star) mean((y - H_L_1p_pdry(k, k_star, q_k_star, par[1]))^2, na.rm=TRUE)
+
+
+# --- 4. Loop Through All Stats and Optimize ---
+k_obs <- fit_data$k_hours
+k_star <- 24
+
+# List of columns we want to optimize
+stats_to_fit <- setdiff(names(fit_data), c("scale", "k_hours"))
+
+# Store results
+all_fits_list <- list()
+
+for (stat in stats_to_fit) {
+  
+  y_obs <- fit_data[[stat]]
+  
+  # Skip if all NA (e.g., if you lacked enough data points for an L-moment)
+  if(all(is.na(y_obs))) next
+  
+  # Get empirical 24h value for the interpolation constraints
+  q_k_star <- fit_data[[stat]][fit_data$k_hours == k_star]
+  
+  # Set up upper bounds dynamically based on the data
+  # Parameters: par[1] = H0, par[2] = a, par[3] = b 
+  # For H0, we allow it to be much larger than the observed maximum
+  max_H0 <- ifelse(stat == "p_zero", 1, max(y_obs, na.rm = TRUE) * 10)
+  
+  # Turn off DEoptim printouts to keep the console clean
+  de_ctrl <- DEoptim.control(trace = FALSE, itermax = 500)
+  
+ 
+  # ----- Fit 2-Parameter Models -----
+  fit_W_2p <- DEoptim(mse_W_2p, lower = c(1e-6, 1e-6), upper = c(max_H0, 10), 
+                      k = k_obs, y = y_obs, k_star = k_star, q_k_star = q_k_star, control = de_ctrl)
+  
+  fit_L_2p <- DEoptim(mse_L_2p, lower = c(1e-6, 1e-6), upper = c(max_H0, 1000), 
+                      k = k_obs, y = y_obs, k_star = k_star, q_k_star = q_k_star, control = de_ctrl)
+  
+  # Create a row of results
+  res_row <- data.frame(
+    Statistic = stat,
+    Model = c( "Weibull_2p", "PowerLaw_2p"),
+    H0 = c( fit_W_2p$optim$bestmem[1], fit_L_2p$optim$bestmem[1]),
+    Param_a = c( fit_W_2p$optim$bestmem[2], NA),
+    Param_b = c( NA, fit_L_2p$optim$bestmem[2]),
+    MSE = c( fit_W_2p$optim$bestval, fit_L_2p$optim$bestval)
+  )
+  
+  # ----- Fit 1-Parameter Models (ONLY for p_zero) -----
+  if (stat == "p_zero") {
+    fit_W_1p <- DEoptim(mse_W_1p, lower = 1e-6, upper = 10, 
+                        k = k_obs, y = y_obs, k_star = k_star, q_k_star = q_k_star, control = de_ctrl)
+    
+    fit_L_1p <- DEoptim(mse_L_1p, lower = 1e-6, upper = 1000, 
+                        k = k_obs, y = y_obs, k_star = k_star, q_k_star = q_k_star, control = de_ctrl)
+    
+    res_1p <- data.frame(
+      Statistic = stat,
+      Model = c("Weibull_1p", "PowerLaw_1p"),
+      H0 = c(1, 1), # H0 is fixed to 1 for probability dry 1p models
+      Param_a = c(fit_W_1p$optim$bestmem[1], NA),
+      Param_b = c(NA, fit_L_1p$optim$bestmem[1]),
+      MSE = c(fit_W_1p$optim$bestval, fit_L_1p$optim$bestval)
+    )
+    res_row <- bind_rows(res_row, res_1p)
+  }
+  
+  # Append to master list
+  all_fits_list[[stat]] <- res_row
+}
+
+# Combine everything into a clean final dataframe
+optimized_parameters_df <- bind_rows(all_fits_list)
+
+
+```
+
+
+
+```{r}
+library(dplyr)
+
+# --- 1. Define the sMAPE Function ---
+# Custom function to safely calculate sMAPE (handles 0/0 division if both are exactly zero)
+calculate_smape <- function(actual, predicted) {
+  denominator <- abs(actual) + abs(predicted)
+  diff <- abs(predicted - actual)
+  
+  # If both actual and predicted are 0, error is 0. Otherwise, compute normally.
+  error_terms <- ifelse(denominator == 0, 0, 2 * diff / denominator)
+  
+  # Return the mean percentage error
+  mean(error_terms, na.rm = TRUE) * 100
+}
+
+
+# --- 2. Isolate the Validation Data & Anchors ---
+# Filter empirical data for hours 1 to 23
+validation_data <- final_summary_df %>% 
+  filter(k_hours < 24) %>% 
+  arrange(k_hours)
+
+k_val <- validation_data$k_hours
+k_star <- 24
+
+# We need the empirical values at k=24 (q_k_star) for the 2p and 1p models
+# We extract just the row corresponding to 24 hours
+empirical_24h <- final_summary_df %>% filter(k_hours == k_star)
+
+
+# --- 3. Predict and Compare ---
+# Create an empty list to store the updated rows
+validation_results_list <- list()
+
+# Loop through every fitted model in our optimized dataframe
+for (i in 1:nrow(optimized_parameters_df)) {
+  
+  # Extract current row parameters
+  current_fit <- optimized_parameters_df[i, ]
+  stat <- current_fit$Statistic
+  model_type <- current_fit$Model
+  
+  H0_val <- current_fit$H0
+  a_val <- current_fit$Param_a
+  b_val <- current_fit$Param_b
+  
+  # Fetch actual validation values and the 24h anchor for this specific statistic
+  actual_vals <- validation_data[[stat]]
+  q_k_star_val <- empirical_24h[[stat]]
+  
+  # Skip if there's no actual validation data (e.g., higher moments lacking data)
+  if (all(is.na(actual_vals))) {
+    current_fit$sMAPE_validation <- NA
+    validation_results_list[[i]] <- current_fit
+    next
+  }
+  
+  # Generate predictions based on the specific model type
+  predicted_vals <- switch(model_type,
+    "Weibull_3p"  = H_W_3p(k_val, H0_val, a_val, b_val),
+    "PowerLaw_3p" = H_L_3p(k_val, H0_val, a_val, b_val),
+    "Weibull_2p"  = H_W_2p(k_val, H0_val, k_star, q_k_star_val, a_val),
+    "PowerLaw_2p" = H_L_2p(k_val, H0_val, k_star, q_k_star_val, b_val),
+    "Weibull_1p"  = H_W_1p_pdry(k_val, k_star, q_k_star_val, a_val),
+    "PowerLaw_1p" = H_L_1p_pdry(k_val, k_star, q_k_star_val, b_val),
+    rep(NA, length(k_val)) # Default fallback
+  )
+  
+  # Calculate sMAPE
+  smape_val <- calculate_smape(actual_vals, predicted_vals)
+  
+  # Append to dataframe
+  current_fit$sMAPE_validation <- smape_val
+  validation_results_list[[i]] <- current_fit
+}
+
+
+
+# --- 4. Final Output ---
+# Bind it all back together
+final_evaluated_models <- bind_rows(validation_results_list)
+
+# View the top performing models across all stats based on validation error
+best_models <- final_evaluated_models %>%
+  group_by(Statistic) %>%
+  slice_min(order_by = sMAPE_validation, n = 1) %>%
+  ungroup()
+
+print(best_models)
+```
+
+
+
+```{r}
+# Get the empirical hours we evaluated
+k_empirical <- sort(unique(final_summary_df$k_hours))
+k_star <- 24
+
+predicted_list <- list()
+
+for (stat in unique(optimized_parameters_df$Statistic)) {
+  
+  # Get empirical values for this statistic
+  q_k_star_val <- final_summary_df[[stat]][final_summary_df$k_hours == k_star]
+  actual_vals <- final_summary_df[[stat]][match(k_empirical, final_summary_df$k_hours)]
+  
+  # Filter params for this stat
+  params <- optimized_parameters_df %>% filter(Statistic == stat)
+  
+  # Initialize a dataframe for this statistic
+  df_stat <- data.frame(
+    Scale_k = k_empirical,
+    Statistic = stat,
+    Actual = actual_vals
+  )
+  
+  # Loop through each model fitted for this statistic and predict
+  for (i in 1:nrow(params)) {
+    m_name <- params$Model[i]
+    H0_val <- params$H0[i]
+    a_val <- params$Param_a[i]
+    b_val <- params$Param_b[i]
+    
+    predicted_vals <- switch(m_name,
+      "Weibull_3p"  = H_W_3p(k_empirical, H0_val, a_val, b_val),
+      "PowerLaw_3p" = H_L_3p(k_empirical, H0_val, a_val, b_val),
+      "Weibull_2p"  = H_W_2p(k_empirical, H0_val, k_star, q_k_star_val, a_val),
+      "PowerLaw_2p" = H_L_2p(k_empirical, H0_val, k_star, q_k_star_val, b_val),
+      "Weibull_1p"  = H_W_1p_pdry(k_empirical, k_star, q_k_star_val, a_val),
+      "PowerLaw_1p" = H_L_1p_pdry(k_empirical, k_star, q_k_star_val, b_val),
+      rep(NA, length(k_empirical))
+    )
+    
+    df_stat[[m_name]] <- predicted_vals
+  }
+  
+  predicted_list[[stat]] <- df_stat
+}
+
+# Final dataframe containing all empirical vs predicted values
+all_predictions_df <- bind_rows(predicted_list)
+```
+
+
+
+```{r}
+library(ggplot2)
+
+plot_statistic_dynamic <- function(stat_name, y_label = stat_name) {
+  
+  # 1. Prepare Empirical Data points
+  emp_data <- final_summary_df %>%
+    select(k_hours, value = !!sym(stat_name)) %>%
+    filter(!is.na(value)) %>%
+    mutate(Data_Type = ifelse(k_hours >= 24, "Calib. data", "Valid. data"))
+  
+  # Get dynamic minimum and maximum from your actual data
+  min_k <- min(emp_data$k_hours, na.rm = TRUE)
+  max_k <- max(emp_data$k_hours, na.rm = TRUE)
+  
+  q_k_star_val <- emp_data$value[emp_data$k_hours == 24]
+  if(length(q_k_star_val) == 0) {
+    warning(paste("No 24h anchor found for", stat_name, "- skipping plot."))
+    return(NULL) 
+  }
+  
+  # 2. Prepare Smooth Curves Data
+  # Now stretches perfectly from your exact min to your exact max scale
+  k_smooth <- exp(seq(log(min_k), log(max_k), length.out = 500))
+  params <- optimized_parameters_df %>% filter(Statistic == stat_name)
+  
+  smooth_lines_list <- list()
+  for (i in 1:nrow(params)) {
+    m_name <- params$Model[i]
+    H0_val <- params$H0[i]
+    a_val <- params$Param_a[i]
+    b_val <- params$Param_b[i]
+    
+    pred_smooth <- switch(m_name,
+      "Weibull_3p"  = H_W_3p(k_smooth, H0_val, a_val, b_val),
+      "PowerLaw_3p" = H_L_3p(k_smooth, H0_val, a_val, b_val),
+      "Weibull_2p"  = H_W_2p(k_smooth, H0_val, 24, q_k_star_val, a_val),
+      "PowerLaw_2p" = H_L_2p(k_smooth, H0_val, 24, q_k_star_val, b_val),
+      "Weibull_1p"  = H_W_1p_pdry(k_smooth, 24, q_k_star_val, a_val),
+      "PowerLaw_1p" = H_L_1p_pdry(k_smooth, 24, q_k_star_val, b_val)
+    )
+    
+    smooth_lines_list[[i]] <- data.frame(Scale_k = k_smooth, Model = m_name, value = pred_smooth)
+  }
+  smooth_data <- bind_rows(smooth_lines_list)
+  
+  # Set up aesthetics
+  line_colors <- c("Weibull_1p" = "blue", "PowerLaw_1p" = "red",
+                   "Weibull_2p" = "blue", "PowerLaw_2p" = "red",
+                   "Weibull_3p" = "darkblue", "PowerLaw_3p" = "darkred")
+  
+  line_types <- c("Weibull_1p" = "solid", "PowerLaw_1p" = "solid",
+                  "Weibull_2p" = "dashed", "PowerLaw_2p" = "dashed",
+                  "Weibull_3p" = "dotted", "PowerLaw_3p" = "dotted")
+  
+  # Create dynamic breaks that look good on a log scale for meteorological data
+  standard_breaks <- c(1, 2, 4, 6, 12, 24, 48, 72, 96, 120, 168, 240, 360, 720, 1440)
+  dynamic_breaks <- standard_breaks[standard_breaks <= max_k]
+  # Ensure the max scale is always labeled if it's not in the standard list
+  if (!(max_k %in% dynamic_breaks)) dynamic_breaks <- c(dynamic_breaks, max_k)
+  
+  # 3. Build the Plot
+  p <- ggplot() +
+    geom_line(data = smooth_data, aes(x = Scale_k, y = value, color = Model, linetype = Model), linewidth = 1) +
+    geom_point(data = emp_data, aes(x = k_hours, y = value, fill = Data_Type), 
+               shape = 21, color = "white", size = 3, stroke = 0.5) +
+    geom_vline(xintercept = 24, linetype = "dashed", color = "darkgray", linewidth = 0.8) +
+    
+    # Apply dynamic breaks here
+    scale_x_log10(breaks = dynamic_breaks, labels = dynamic_breaks) +
+    
+    scale_fill_manual(values = c("Calib. data" = "black", "Valid. data" = "orange")) +
+    scale_color_manual(values = line_colors) +
+    scale_linetype_manual(values = line_types) +
+    
+    labs(x = "Temporal scale, k [h]", y = y_label, 
+         fill = "Data", color = "Model", linetype = "Model") +
+    
+    theme_bw() +
+    theme(
+      panel.grid.major = element_line(linetype = "dashed", color = "lightgray"),
+      panel.grid.minor = element_blank(),
+      legend.position = c(0.2, 0.2), 
+      legend.background = element_rect(color = "black", fill = "white"),
+      legend.key = element_blank(),
+      legend.title = element_blank()
+    )
+  
+  return(p)
+}
+
+# Generate the plot
+plot_p_zero_all_scales <- plot_statistic_dynamic("p_zero", y_label = expression(p[0]^{(k)}))
+print(plot_p_zero_all_scales)
+
+
+```
+

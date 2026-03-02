@@ -31,6 +31,9 @@ start_ts <- ymd(start_date_str)
 end_ts <- ymd(end_date_str)
 df$date <- seq(start_ts, end_ts, by = "day")
 
+
+
+
 # --- 3. CONVERT TO AVERAGED PROCESS ---
 intervals_per_day <- 96
 df$precip_rate <- df$precip / intervals_per_day
