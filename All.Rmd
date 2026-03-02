@@ -7,6 +7,8 @@ library(DEoptim)
 library(lmomco)
 library(DEoptim)
 library(tidyr)
+library(tools)
+library(purrr) 
 ```
 
 ```{r}
@@ -17,40 +19,40 @@ generalData_path <- file.path(gdrive_path,"General_Data")
 
 
 ```{r}
-source("Downscale_P_Lm_fun.R")
-
-# Define your folder
-file_list <- list.files(file.path(generalData_path, "EL08"), pattern = "\\.txt$", full.names = TRUE)
-
-file_list <- file_list[
-  grep("agchialos|makrinitsa_YPEN_|spilia_YPEN_", file_list)
-]
-
-# 1. Run the function on all files in the list
-# (Using lapply to apply the function to each file path)
-results_list <- lapply(file_list, Lm_Pd_downscaleFun)
-
-# 2. Extract and combine the results into master dataframes
-all_estimates <- bind_rows(lapply(results_list, function(x) x$estimates))
-all_inspection <- bind_rows(lapply(results_list, function(x) x$inspection))
-all_params <- bind_rows(lapply(results_list, function(x) x$params))
-
-
-
-# Recreate the bounded model function for plotting
-bounded_model_plot <- function(k, p1, p2, p3) {
-  p1 ^ ((1 + (p2^(-1/p3) - 1) * (k - 1))^p3)
-}
-
-# Reshape the empirical data (inspection) to long format for ggplot
-inspection_long <- all_inspection %>%
-  pivot_longer(
-    cols = c(prob_dry, L_var_all, L_skew_all, L_var_pos, L_skew_pos),
-    names_to = "statistic",
-    values_to = "empirical_value"
-  )
-
-
+# source("Downscale_P_Lm_fun.R")
+# 
+# # Define your folder
+# file_list <- list.files(file.path(generalData_path, "EL08"), pattern = "\\.txt$", full.names = TRUE)
+# 
+# file_list <- file_list[
+#   grep("agchialos|makrinitsa_YPEN_|spilia_YPEN_", file_list)
+# ]
+# 
+# # 1. Run the function on all files in the list
+# # (Using lapply to apply the function to each file path)
+# results_list <- lapply(file_list, Lm_Pd_downscaleFun)
+# 
+# # 2. Extract and combine the results into master dataframes
+# all_estimates <- bind_rows(lapply(results_list, function(x) x$estimates))
+# all_inspection <- bind_rows(lapply(results_list, function(x) x$inspection))
+# all_params <- bind_rows(lapply(results_list, function(x) x$params))
+# 
+# 
+# 
+# # Recreate the bounded model function for plotting
+# bounded_model_plot <- function(k, p1, p2, p3) {
+#   p1 ^ ((1 + (p2^(-1/p3) - 1) * (k - 1))^p3)
+# }
+# 
+# # Reshape the empirical data (inspection) to long format for ggplot
+# inspection_long <- all_inspection %>%
+#   pivot_longer(
+#     cols = c(prob_dry, L_var_all, L_skew_all, L_var_pos, L_skew_pos),
+#     names_to = "statistic",
+#     values_to = "empirical_value"
+#   )
+# 
+# 
 
 
 
@@ -59,109 +61,488 @@ inspection_long <- all_inspection %>%
 
 
 
-
 ```{r}
-# Recreate the bounded model function
-bounded_model_plot <- function(k, p1, p2, p3) {
-  p1 ^ ((1 + (p2^(-1/p3) - 1) * (k - 1))^p3)
+# =====================================================================
+# MAIN EXECUTION SCRIPT
+# =====================================================================
+
+# 1. Setup Paths
+gdrive_path <- paste(LETTERS[file.exists(paste0(LETTERS, ":/My Drive"))], ":/My Drive", sep = "")
+project_path <- file.path(gdrive_path, "Academic_git/DownScaling")
+generalData_path <- file.path(gdrive_path, "General_Data")
+
+
+# 3. Locate Station Files
+data_dir <- file.path(generalData_path, "GSDR/QC_d data - Germany")
+station_files <- list.files(path = data_dir, pattern = "\\.txt$", full.names = TRUE)
+
+station_ids <- file_path_sans_ext(basename(station_files))
+names(station_files) <- station_ids
+
+# (Optional: Test on a small subset first)
+station_files <- station_files[1]
+
+
+
+df <- read.table(station_files, skip =21, col.names = "precip")
+
+df$precip[df$precip == -999] <- NA
+
+
+header_lines <- readLines(station_files, n = 21)
+start_date_str <- sub("Start datetime: ", "", grep("^Start datetime:", header_lines, value = TRUE))
+end_date_str <- sub("End datetime: ", "", grep("^End datetime:", header_lines, value = TRUE))
+
+
+start_ts <- ymd_h(start_date_str)
+end_ts <- ymd_h(end_date_str)
+df$date <- seq(start_ts, end_ts, by = "hour")
+
+
+# --- 3. CONVERT TO AVERAGED PROCESS ---
+#We have hourly data and we want to extrapolate to 15 mins.
+#The 15 mins are scale k=1 so hourly data k=4
+#Base_time_chunks = 15 mins
+#The daily data are a sum of 4 base time chunks (=15 mins) so we need to make them in an average process. Divide by 4
+
+
+Base_time_chunks_per_hour <- 4
+df$precip_rate <- df$precip / Base_time_chunks_per_hour
+df$hour_index <- 0:(nrow(df) - 1)
+
+# --- 4. AGGREGATE ---
+# I  will fit the data  in the empirical data coming from 1 to 10 days mean aggregation 
+# T will validate the fitted curve in the empirical data from 1 to 12 hours
+# However i have daily data. The aggregation needs to be in that scale 
+
+empirical_k_training <- seq(1:10)*24* Base_time_chunks_per_hour
+empirical_k_validation <- seq(1:23) * Base_time_chunks_per_hour
+all_k<-c(empirical_k_validation,empirical_k_training)
+
+# Create an empty list to store our inspection dataframes
+inspection_list <- list()
+
+for (i in seq_along(all_k)) {
+ 
+
+ # I have hourly data. The aggregation needs to be in that scale. Meaning
+ # if i want the scale k=8 (4*8= 48mins =2 days) i need to aggregate the
+ # hourly data by 2. Thats why i divide by 4 so the aggregation length to be in hours 
+
+  agg_length <-all_k[i]/Base_time_chunks_per_hour
+
+
+  df_detailed <- df %>%
+    mutate(bin_id = hour_index %/% agg_length) %>%
+    group_by(bin_id) %>%
+    mutate(
+      hours_in_bin = n(),
+      bin_mean_precip = mean(precip_rate, na.rm = FALSE),
+      is_valid_bin = (!is.na(bin_mean_precip) & hours_in_bin == agg_length)
+    ) %>%
+    ungroup()
+  # Save the dataframe to our list for later inspection
+  list_name <- paste0("scale_", agg_length, "Hours")
+  inspection_list[[list_name]] <- df_detailed
 }
 
-# Define the custom plotting function
-plot_downscale_curve <- function(selected_station, selected_stat, all_estimates, all_inspection, all_params) {
+
+
+clean_bins_list <- list()
+
+for (scale_name in names(inspection_list)) {
   
-  # 1. Map empirical statistic names to parameter prefixes
-  stat_map <- c(
-    "prob_dry" = "p_dry", 
-    "L_var_all" = "L_var_all",
-    "L_skew_all" = "L_skew_all", 
-    "L_var_pos" = "L_var_pos",
-    "L_skew_pos" = "L_skew_pos"
-  )
-  param_prefix <- stat_map[[selected_stat]]
+  df_detailed <- inspection_list[[scale_name]]
   
-  # 2. Filter empirical data for the selected station and statistic
-  emp_data <- all_inspection %>%
-    filter(station == selected_station) %>%
-    select(scale_days, empirical_value = all_of(selected_stat))
-  
-  # 3. Extract the 3 optimized parameters for this specific curve
-  station_params <- all_params %>% filter(Station == selected_station)
-  p1 <- station_params[[paste0(param_prefix, "_m_basic")]][1]
-  p2 <- station_params[[paste0(param_prefix, "_xi")]][1]
-  p3 <- station_params[[paste0(param_prefix, "_eta")]][1]
-  
-  # 4. Generate the continuous curve data (Log-spaced from 15 mins to 10 days)
-  intervals_per_day <- 96
-  min_days <- 1 / intervals_per_day
-  max_days <- max(emp_data$scale_days, na.rm = TRUE)
-  
-  day_seq <- exp(seq(log(min_days), log(max_days), length.out = 200))
-  k_seq <- day_seq * intervals_per_day
-  fitted_vals <- bounded_model_plot(k_seq, p1, p2, p3)
-  
-  curve_data <- data.frame(scale_days = day_seq, fitted_value = fitted_vals)
-  
-  # Split the curve into "Fitted" (>= 1 day) and "Downscaled" (< 1 day) 
-  # to match the paper's solid vs. dashed line aesthetics
-  curve_fitted <- curve_data %>% filter(scale_days >= 1)
-  curve_downscaled <- curve_data %>% filter(scale_days <= 1)
-  
-  # 5. Create the plot matching the paper's aesthetics
-  p <- ggplot() +
-    # Vertical grey dashed line separating downscaled vs fitted regions
-    geom_vline(xintercept = 1, linetype = "dashed", color = "darkgrey", linewidth = 0.8) +
-    
-    # Downscaled model (dashed black line)
-    geom_line(data = curve_downscaled, aes(x = scale_days, y = fitted_value), 
-              color = "black", linetype = "dashed", linewidth = 0.8) +
-              
-    # Fitted model (solid black line)
-    geom_line(data = curve_fitted, aes(x = scale_days, y = fitted_value), 
-              color = "black", linetype = "solid", linewidth = 0.8) +
-              
-    # Empirical data (orange points)
-    geom_point(data = emp_data, aes(x = scale_days, y = empirical_value), 
-               color = "#FFA500", size = 2.5, alpha = 0.9) +
-    
-    # X-Axis Log Scale with custom labels
-    scale_x_log10(
-      breaks = c(1/96, 1, 2, 5, 10),
-      labels = c("15m", "1", "2", "5", "10")
-    ) +
-    
-    # Labels and Titles (Including the parameters in the subtitle like the paper)
-    labs(
-      title = paste("Station:", selected_station, "| Statistic:", selected_stat),
-      subtitle = sprintf("Fitted model: p1 = %.3f, \u03BE = %.3f, \u03B7 = %.3f", p1, p2, p3),
-      x = "Scale (Days)",
-      y = selected_stat
-    ) +
-    
-    # Aesthetic adjustments to strictly mimic the paper
-    theme(
-      # The paper uses the default ggplot2 grey background
-      panel.background = element_rect(fill = "#EBEBEB", color = NA),
-      panel.grid.major = element_line(color = "white", linewidth = 0.5),
-      panel.grid.minor = element_blank(),
-      plot.title = element_text(size = 11, face = "bold"),
-      plot.subtitle = element_text(size = 9, color = "darkgrey"),
-      axis.title = element_text(size = 10)
+  valid_bins <- df_detailed %>%
+    filter(is_valid_bin) %>%
+    group_by(bin_id) %>%
+    summarise(
+      agg_date = min(date),
+      bin_mean_precip = first(bin_mean_precip), #
+      .groups = "drop"
     )
   
-  return(p)
+  clean_bins_list[[scale_name]] <- valid_bins
+}
+
+# Create an empty list to temporarily hold the summary rows
+summary_stats_list <- list()
+
+for (scale_name in names(clean_bins_list)) {
+  
+  # Extract the precipitation data for the current scale
+  df_clean <- clean_bins_list[[scale_name]]
+  x_all <- df_clean$bin_mean_precip
+  
+  # Filter for strictly positive rainfall
+  x_pos <- x_all[x_all > 0]
+  
+  # --- 1. Probability of Zero Rainfall ---
+  p_zero <- sum(x_all == 0) / length(x_all)
+  
+  # --- 2. Mean and Variance ---
+  mean_all <- mean(x_all, na.rm = TRUE)
+  var_all  <- var(x_all, na.rm = TRUE)
+  
+  mean_pos <- ifelse(length(x_pos) > 0, mean(x_pos, na.rm = TRUE), NA)
+  var_pos  <- ifelse(length(x_pos) > 1, var(x_pos, na.rm = TRUE), NA)
+  
+  # --- 3. L-moments for ALL data ---
+  # Check if we have at least 4 data points to calculate up to the 4th ratio
+  if (length(x_all) >= 4) {
+    lm_all <- lmoms(x_all)
+    l1_all <- lm_all$lambdas[1]
+    l2_all <- lm_all$lambdas[2]
+    l3_all <- lm_all$lambdas[3]
+    t2_all <- lm_all$ratios[2]
+    t3_all <- lm_all$ratios[3]
+    t4_all <- lm_all$ratios[4]
+  } else {
+    l1_all <- l2_all <- l3_all <- t1_all <- t2_all <- t3_all <- t4_all <- NA
+  }
+  
+  # --- 4. L-moments for POSITIVE data ---
+  if (length(x_pos) >= 4) {
+    lm_pos <- lmoms(x_pos)
+    l1_pos <- lm_pos$lambdas[1]
+    l2_pos <- lm_pos$lambdas[2]
+    l3_pos <- lm_pos$lambdas[3]
+    t2_pos <- lm_pos$ratios[2]
+    t3_pos <- lm_pos$ratios[3]
+    t4_pos <- lm_pos$ratios[4]
+  } else {
+    l1_pos <- l2_pos <- l3_pos <- t1_pos <- t2_pos <- t3_pos <- t4_pos <- NA
+  }
+  
+  # --- 5. Combine into a single row ---
+  scale_summary <- data.frame(
+    scale = scale_name,
+    p_zero = p_zero,
+    
+    # All Data Stats
+    mean_all = mean_all, var_all = var_all,
+    l1_all = l1_all, l2_all = l2_all, l3_all = l3_all, t2_all = t2_all, t3_all = t3_all, t4_all = t4_all,
+    
+    # Positive Data Stats
+    mean_pos = mean_pos, var_pos = var_pos,
+    l1_pos = l1_pos, l2_pos = l2_pos, l3_pos = l3_pos, t2_pos = t2_pos, t3_pos = t3_pos, t4_pos = t4_pos
+  )
+  
+  # Store the row in our list
+  summary_stats_list[[scale_name]] <- scale_summary
+}
+
+# Bind everything together into one tidy dataframe
+final_summary_df <- bind_rows(summary_stats_list)
+# =====================================================================
+# CORE MATHEMATICAL FUNCTIONS
+# =====================================================================
+
+# -- 2-Parameter Functions (Interpolation Constraint) --
+H_W_2p <- function(k, H0, k_star, q_k_star, a) {
+  power_exponent <- (k / k_star)^a
+  base_fraction <- q_k_star / H0
+  H0 * (base_fraction ^ power_exponent)
+}
+
+H_L_2p <- function(k, H0, k_star, q_k_star, b) {
+  ln_numerator <- log(1 + b * k)
+  ln_denominator <- log(1 + b * k_star)
+  power_exponent <- ln_numerator / ln_denominator
+  base_fraction <- q_k_star / H0
+  H0 * (base_fraction ^ power_exponent)
+}
+
+# -- 1-Parameter Functions (Probability Dry, H0 fixed internally to 1) --
+H_W_1p_pdry <- function(k, k_star, q_k_star, a) {
+  H0 <- 1 
+  power_exponent <- (k / k_star)^a
+  base_fraction <- q_k_star / H0
+  H0 * (base_fraction ^ power_exponent)
+}
+
+H_L_1p_pdry <- function(k, k_star, q_k_star, b) {
+  H0 <- 1 
+  ln_numerator <- log(1 + b * k)
+  ln_denominator <- log(1 + b * k_star)
+  power_exponent <- ln_numerator / ln_denominator
+  base_fraction <- q_k_star / H0
+  H0 * (base_fraction ^ power_exponent)
 }
 
 
 
-# Example 1: Plotting L-skewness for a specific station
-plot_downscale_curve(
-  selected_station = "spilia_YPEN_.txt", # Replace with your exact filename
-  selected_stat = "L_skew_all", 
-  all_estimates = all_estimates, 
-  all_inspection = all_inspection, 
-  all_params = all_params
+# --- 1. Filter Data ---
+final_summary_df <- final_summary_df %>%
+  mutate(k_hours = as.numeric(gsub("[^0-9.]", "", scale)))
+
+fit_data <- final_summary_df %>% 
+  filter(k_hours >= 24) %>% 
+  arrange(k_hours)
+
+# --- 2. Define MSE Functions ---
+mse_W_2p <- function(par, k, y, k_star, q_k_star) mean((y - H_W_2p(k, par[1], k_star, q_k_star, par[2]))^2, na.rm=TRUE)
+mse_L_2p <- function(par, k, y, k_star, q_k_star) mean((y - H_L_2p(k, par[1], k_star, q_k_star, par[2]))^2, na.rm=TRUE)
+
+mse_W_1p <- function(par, k, y, k_star, q_k_star) mean((y - H_W_1p_pdry(k, k_star, q_k_star, par[1]))^2, na.rm=TRUE)
+mse_L_1p <- function(par, k, y, k_star, q_k_star) mean((y - H_L_1p_pdry(k, k_star, q_k_star, par[1]))^2, na.rm=TRUE)
+
+# --- 3. Setup Loop ---
+k_obs <- fit_data$k_hours
+k_star <- 24
+
+# List of columns we want to optimize (excluding means, vars, and lambdas)
+stats_to_fit <- setdiff(names(fit_data), c(
+  "scale", "k_hours", "mean_all", "var_all", "l1_all", "l2_all", "l3_all",
+  "mean_pos", "var_pos", "l1_pos", "l2_pos", "l3_pos"
+))
+
+# Store results
+all_fits_list <- list()
+
+# Turn off DEoptim printouts outside the loop to keep the console clean
+# 2. More thorough control settings
+de_ctrl <- DEoptim.control(
+  trace = FALSE, 
+  itermax = 2000,   # Increased from 500 
+  NP = 200,          # Larger population for a more thorough search
+  reltol = 1e-8,    # Tighter tolerance for better precision
+  steptol = 200     # Number of steps to wait for improvement
 )
 
+# --- 4. Loop Through All Stats and Optimize ---
+for (stat in stats_to_fit) {
+  
+  y_obs <- fit_data[[stat]]
+  
+  # Skip if all observations are NA
+  if(all(is.na(y_obs))) next
+  
+  # Get empirical 24h value for the interpolation constraints (force single value)
+  q_k_star <- fit_data[[stat]][fit_data$k_hours == k_star][1]
+  
+  # Safety check: If the anchor itself is missing, the math won't work. Skip stat.
+  if(is.na(q_k_star)) next
+  
+  # Set up upper bounds dynamically based on the data
+  # Allow H0 to be up to 1 for p_zero, but let it scale up for other ratios (e.g. L-CV > 1)
+  if (stat == "p_zero") {
+    max_H0 <- 1
+  } else {
+    max_H0 <- 1
+  }
+  
+  # ----- Fit 2-Parameter Models -----
+  fit_W_2p <- DEoptim(mse_W_2p, lower = c(1e-6, 1e-6), upper = c(max_H0, 1000), 
+                      k = k_obs, y = y_obs, k_star = k_star, q_k_star = q_k_star, control = de_ctrl)
+  
+  fit_L_2p <- DEoptim(mse_L_2p, lower = c(1e-6, 1e-6), upper = c(max_H0, 1000), 
+                      k = k_obs, y = y_obs, k_star = k_star, q_k_star = q_k_star, control = de_ctrl)
+  
+  # Create a row of results
+  res_row <- data.frame(
+    Statistic = stat,
+    Model = c("Weibull_2p", "PowerLaw_2p"),
+    H0 = c(fit_W_2p$optim$bestmem[1], fit_L_2p$optim$bestmem[1]),
+    Param_a = c(fit_W_2p$optim$bestmem[2], NA),
+    Param_b = c(NA, fit_L_2p$optim$bestmem[2]),
+    MSE = c(fit_W_2p$optim$bestval, fit_L_2p$optim$bestval)
+  )
+  
+  # ----- Fit 1-Parameter Models (ONLY for p_zero) -----
+  if (stat == "p_zero") {
+    fit_W_1p <- DEoptim(mse_W_1p, lower = 1e-6, upper = 1000, 
+                        k = k_obs, y = y_obs, k_star = k_star, q_k_star = q_k_star, control = de_ctrl)
+    
+    fit_L_1p <- DEoptim(mse_L_1p, lower = 1e-6, upper = 1000, 
+                        k = k_obs, y = y_obs, k_star = k_star, q_k_star = q_k_star, control = de_ctrl)
+    
+    res_1p <- data.frame(
+      Statistic = stat,
+      Model = c("Weibull_1p", "PowerLaw_1p"),
+      H0 = c(1, 1), # H0 is fixed to 1 for probability dry 1p models
+      Param_a = c(fit_W_1p$optim$bestmem[1], NA),
+      Param_b = c(NA, fit_L_1p$optim$bestmem[1]),
+      MSE = c(fit_W_1p$optim$bestval, fit_L_1p$optim$bestval)
+    )
+    res_row <- bind_rows(res_row, res_1p)
+  }
+  
+  # Append to master list
+  all_fits_list[[stat]] <- res_row
+}
+
+# Combine everything into a clean final dataframe
+optimized_parameters_df <- bind_rows(all_fits_list)
+
+
+# =====================================================================
+# 1. DEFINE METRICS
+# =====================================================================
+
+# Custom function to safely calculate Mean Absolute Percentage Error (MAPE)
+calculate_mape <- function(actual, predicted) {
+  # Standard MAPE formula: abs((actual - predicted) / actual)
+  # We use ifelse to handle exact zeros in 'actual' to avoid Inf/NaN errors.
+  error_terms <- ifelse(actual == 0,
+                        ifelse(predicted == 0, 0, NA), # If both are 0, error is 0. Else ignore.
+                        abs((actual - predicted) / actual))
+  
+  # Return the mean percentage error
+  mean(error_terms, na.rm = TRUE) * 100
+}
+
+
+# =====================================================================
+# 2. EVALUATE VALIDATION DATA (Hours 1-23)
+# =====================================================================
+
+# Filter empirical data for hours 1 to 23
+validation_data <- final_summary_df %>% 
+  filter(k_hours < 24) %>% 
+  arrange(k_hours)
+
+k_val <- validation_data$k_hours
+k_star <- 24
+
+# Extract the empirical 24-hour anchor for the 2p and 1p models
+empirical_24h <- final_summary_df %>% filter(k_hours == k_star)
+
+# Empty list to store validation rows
+validation_results_list <- list()
+
+for (i in 1:nrow(optimized_parameters_df)) {
+  
+  current_fit <- optimized_parameters_df[i, ]
+  stat <- current_fit$Statistic
+  model_type <- current_fit$Model
+  
+  H0_val <- current_fit$H0
+  a_val <- current_fit$Param_a
+  b_val <- current_fit$Param_b
+  
+  actual_vals <- validation_data[[stat]]
+  q_k_star_val <- empirical_24h[[stat]]
+  
+  # Skip if there's no actual validation data
+  if (all(is.na(actual_vals))) {
+    current_fit$MAPE_validation <- NA
+    validation_results_list[[i]] <- current_fit
+    next
+  }
+  
+  # Generate predictions based on 2p and 1p models ONLY
+  predicted_vals <- switch(model_type,
+    "Weibull_2p"  = H_W_2p(k_val, H0_val, k_star, q_k_star_val, a_val),
+    "PowerLaw_2p" = H_L_2p(k_val, H0_val, k_star, q_k_star_val, b_val),
+    "Weibull_1p"  = H_W_1p_pdry(k_val, k_star, q_k_star_val, a_val),
+    "PowerLaw_1p" = H_L_1p_pdry(k_val, k_star, q_k_star_val, b_val),
+    rep(NA, length(k_val)) 
+  )
+  
+  # Calculate MAPE and append
+  current_fit$MAPE_validation <- calculate_mape(actual_vals, predicted_vals)
+  validation_results_list[[i]] <- current_fit
+}
+
+# Bind validation results and find the best models based on lowest MAPE
+final_evaluated_models <- bind_rows(validation_results_list)
+
+
+best_models <- final_evaluated_models %>%
+  group_by(Statistic) %>%
+  slice_min(order_by = MAPE_validation, n = 1) %>%
+  ungroup()
+
+
+print("--- Top Performing Models by MAPE ---")
+print(best_models)
+
+
+# =====================================================================
+# 3. GENERATE ALL PREDICTIONS (Calibration + Validation Scales)
+# =====================================================================
+
+library(dplyr)
+
+# 1. Define the scales we want to predict
+k_empirical <- sort(unique(final_summary_df$k_hours))
+
+# Inject 0.25 (15 mins) at the very beginning of our prediction vector
+k_predict <- c(0.25, k_empirical) 
+k_star <- 24
+
+predicted_list <- list()
+
+for (stat in unique(optimized_parameters_df$Statistic)) {
+  
+  # Get empirical 24h anchor for this statistic
+  q_k_star_val <- final_summary_df[[stat]][final_summary_df$k_hours == k_star]
+  
+  # Get actual values. 
+  # Using 'match' will automatically and safely assign NA to the 0.25 scale 
+  # since it doesn't exist in final_summary_df$k_hours.
+  actual_vals <- final_summary_df[[stat]][match(k_predict, final_summary_df$k_hours)]
+  
+  # Filter params for this stat
+  params <- optimized_parameters_df %>% filter(Statistic == stat)
+  
+  # Initialize a dataframe for this statistic
+  df_stat <- data.frame(
+    Scale_k = k_predict,
+    Statistic = stat,
+    Actual = actual_vals
+  )
+  
+  # Loop through each model fitted for this statistic and predict
+  for (i in 1:nrow(params)) {
+    m_name <- params$Model[i]
+    H0_val <- params$H0[i]
+    a_val <- params$Param_a[i]
+    b_val <- params$Param_b[i]
+    
+    # Generate predictions based on 2p and 1p models ONLY
+    predicted_vals <- switch(m_name,
+      "Weibull_2p"  = H_W_2p(k_predict, H0_val, k_star, q_k_star_val, a_val),
+      "PowerLaw_2p" = H_L_2p(k_predict, H0_val, k_star, q_k_star_val, b_val),
+      "Weibull_1p"  = H_W_1p_pdry(k_predict, k_star, q_k_star_val, a_val),
+      "PowerLaw_1p" = H_L_1p_pdry(k_predict, k_star, q_k_star_val, b_val),
+      rep(NA, length(k_predict))
+    )
+    
+    df_stat[[m_name]] <- predicted_vals
+  }
+  
+  predicted_list[[stat]] <- df_stat
+}
+
+# Final dataframe containing all empirical vs predicted values
+all_predictions_df <- bind_rows(predicted_list)
+
+```
+
+
+
+```{r}
+
+
+dir.create(individual_dir, recursive = TRUE, showWarnings = FALSE)
+
+
+print("Exporting Individual Station .rds files...")
+iwalk(all_station_results, function(station_data, station_name) {
+  station_folder <- file.path(individual_dir, station_name)
+  dir.create(station_folder, recursive = TRUE, showWarnings = FALSE)
+  
+  saveRDS(station_data$final_summary_df, file.path(station_folder, "final_summary.rds"))
+  saveRDS(station_data$optimized_parameters_df, file.path(station_folder, "optimized_parameters.rds"))
+  saveRDS(station_data$final_evaluated_models, file.path(station_folder, "final_evaluated_models.rds"))
+  saveRDS(station_data$best_models, file.path(station_folder, "best_models.rds"))
+  saveRDS(station_data$all_predictions_df, file.path(station_folder, "all_predictions.rds"))
+})
+
+print(paste("All processing and exports complete! Check:", export_dir))
 ```
 
 
