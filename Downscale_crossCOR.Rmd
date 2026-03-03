@@ -46,117 +46,219 @@ station_files <- list.files(path = data_dir, pattern = "\\.txt$", full.names = T
 
 
 ```{r}
-all_stations_results <- list()
 
-for (current_station_file in station_files[1:2]) {
+
+station_files <- station_files[1:2]
+
+# --- 1. SETUP STORAGE ---
+raw_data_list <- list()
+all_inspection_lists <- list()
+all_clean_bins_lists <- list()
+
+# --- 2. PASS ONE: READ DATA & EXTRACT DATES ---
+for (current_station_file in station_files) {
   
   station_name <- tools::file_path_sans_ext(basename(current_station_file))
-  cat("\nProcessing station:", station_name, "\n")
-  
-  # Read Header for Timestamps
-  header_lines <- readLines(current_station_file, n = 21)
-  start_date_str <- sub("Start datetime: ", "", grep("^Start datetime:", header_lines, value = TRUE))
-  end_date_str   <- sub("End datetime: ", "", grep("^End datetime:", header_lines, value = TRUE))
-  
-  # --- TIME GRID ALIGNMENT (Snapping to 00:00:00) ---
-  raw_start <- ymd_h(start_date_str)
-  raw_end   <- ymd_h(end_date_str)
-  
-  # Floor the start to the beginning of the day to align different stations
-  snapped_start <- floor_date(raw_start, unit = "day")
-  full_date_seq <- seq(snapped_start, raw_end, by = "hour")
+  cat("Reading station:", station_name, "\n")
   
   # Read Data
-  df_raw <- read.table(current_station_file, skip = 21, col.names = "precip")
-  df_raw$precip[df_raw$precip == -999] <- NA
+  df <- read.table(current_station_file, skip = 21, col.names = "precip")
+  df$precip[df$precip == -999] <- NA
   
-  # Pad the beginning if the station started after midnight
-  padding_needed <- as.numeric(difftime(raw_start, snapped_start, units = "hours"))
-  if (padding_needed > 0) {
-    df <- data.frame(precip = c(rep(NA, padding_needed), df_raw$precip))
-  } else {
-    df <- df_raw
-  }
+  # Read Dates
+  header_lines <- readLines(current_station_file, n = 21)
+  start_date_str <- sub("Start datetime: ", "", grep("^Start datetime:", header_lines, value = TRUE))
+  end_date_str <- sub("End datetime: ", "", grep("^End datetime:", header_lines, value = TRUE))
   
-  df$date <- full_date_seq[1:nrow(df)] # Assign aligned dates
+  start_ts <- ymd_h(start_date_str)
+  end_ts <- ymd_h(end_date_str)
+  df$date <- seq(start_ts, end_ts, by = "hour")
   
-  # --- 3. CONVERT TO AVERAGED PROCESS ---
-  Base_time_chunks_per_hour <- 4
+  # Store the raw dataframe in our list, named by the station
+  raw_data_list[[station_name]] <- df
+}
+
+# --- 3. FIND COMMON DATE WINDOW ---
+# Find the latest start date and the earliest end date among all stations
+common_start <- max(do.call(c, lapply(raw_data_list, function(df) min(df$date))))
+common_end <- min(do.call(c, lapply(raw_data_list, function(df) max(df$date))))
+
+cat("\n======================================================\n")
+cat("Common Time Window:\n")
+cat("Start:", as.character(common_start), "\n")
+cat("End:  ", as.character(common_end), "\n")
+cat("======================================================\n")
+
+# --- 4. PASS TWO: FILTER AND AGGREGATE ---
+Base_time_chunks_per_hour <- 4
+empirical_k_training <- seq(1:10) * 24 * Base_time_chunks_per_hour
+empirical_k_validation <- seq(1:23) * Base_time_chunks_per_hour
+all_k <- c(empirical_k_validation, empirical_k_training)
+
+for (station_name in names(raw_data_list)) {
+  
+  cat("Processing and aggregating:", station_name, "\n")
+  
+  # Pull the raw data for this station and filter to common dates
+  df <- raw_data_list[[station_name]]
+  df <- df %>% filter(date >= common_start & date <= common_end)
+  
+  # Convert to rate
   df$precip_rate <- df$precip / Base_time_chunks_per_hour
   df$hour_index <- 0:(nrow(df) - 1)
   
-  # --- 4. AGGREGATE ACROSS SCALES ---
-  empirical_k_training <- seq(1:10) * 24 * Base_time_chunks_per_hour
-  empirical_k_validation <- seq(1:23) * Base_time_chunks_per_hour
-  all_k <- sort(unique(c(empirical_k_validation, empirical_k_training)))
+  # Setup temporary lists for this specific station
+  station_inspection_list <- list()
+  station_clean_bins_list <- list()
   
-  station_scales <- list()
-  
-  for (k_val in all_k) {
-    agg_length <- k_val / Base_time_chunks_per_hour
+  # Aggregation loop
+  for (i in seq_along(all_k)) {
+    agg_length <- all_k[i] / Base_time_chunks_per_hour
     
-    valid_bins <- df %>%
+    df_detailed <- df %>%
       mutate(bin_id = hour_index %/% agg_length) %>%
       group_by(bin_id) %>%
-      summarise(
+      mutate(
         hours_in_bin = n(),
         bin_mean_precip = mean(precip_rate, na.rm = FALSE),
-        agg_date = min(date),
-        .groups = "drop"
+        is_valid_bin = (!is.na(bin_mean_precip) & hours_in_bin == agg_length)
       ) %>%
-      # Ensure bin is full and has no missing values
-     filter( !is.na(bin_mean_precip)) %>%
-      #filter(hours_in_bin == agg_length & !is.na(bin_mean_precip)) %>%
-      select(agg_date, bin_mean_precip)
+      ungroup()
     
     list_name <- paste0("scale_", agg_length, "Hours")
-    station_scales[[list_name]] <- valid_bins
+    station_inspection_list[[list_name]] <- df_detailed
   }
   
-  all_stations_results[[station_name]] <- station_scales
-}
-
-# =====================================================================
-# 3. CROSS-CORRELATION CALCULATION (LAG-0)
-# =====================================================================
-st1_name <- names(all_stations_results)[1]
-st2_name <- names(all_stations_results)[2]
-
-common_scales <- intersect(names(all_stations_results[[st1_name]]), 
-                           names(all_stations_results[[st2_name]]))
-
-cross_corr_results <- data.frame(Scale_Hours = numeric(), Correlation = numeric())
-
-for (scale_name in common_scales) {
-  
-  d1 <- all_stations_results[[st1_name]][[scale_name]]
-  d2 <- all_stations_results[[st2_name]][[scale_name]]
-  
-  # Merge on agg_date to ensure we compare the exact same time windows
-  matched_data <- inner_join(d1, d2, by = "agg_date", suffix = c("_st1", "_st2"))
-  
-  # Calculate hours from scale name for sorting (e.g., "scale_24Hours" -> 24)
-  h_val <- as.numeric(gsub("scale_|Hours", "", scale_name))
-  
-  if (nrow(matched_data) > 5) { # Need a minimum number of points for valid correlation
-    c_val <- cor(matched_data$bin_mean_precip_st1, matched_data$bin_mean_precip_st2)
-  } else {
-    c_val <- NA
+  # Clean Bins loop
+  for (scale_name in names(station_inspection_list)) {
+    df_detailed <- station_inspection_list[[scale_name]]
+    valid_bins <- df_detailed %>%
+      filter(is_valid_bin) %>%
+      group_by(bin_id) %>%
+      summarise(
+        agg_date = min(date),
+        bin_mean_precip = first(bin_mean_precip),
+        .groups = "drop"
+      )
+    station_clean_bins_list[[scale_name]] <- valid_bins
   }
   
-  cross_corr_results <- rbind(cross_corr_results, 
-                              data.frame(Scale_Hours = h_val, Correlation = c_val))
+  # Save the station's finished lists into the global parent lists
+  all_inspection_lists[[station_name]] <- station_inspection_list
+  all_clean_bins_lists[[station_name]] <- station_clean_bins_list
 }
 
-# Sort by scale for easier reading
-cross_corr_results <- cross_corr_results[order(cross_corr_results$Scale_Hours), ]
-
-# Final Output
-print(cross_corr_results)
-
-plot(cross_corr_results)
 
 ```
 
+
+```{r}
+
+```
+
+
+
+
+
+
+
+
+
+```{r}
+# Extract the names of your two stations
+station_names <- names(all_clean_bins_lists)
+stat1 <- station_names[1]
+stat2 <- station_names[2]
+
+cat("\n======================================================\n")
+cat("Calculating Cross-Correlation (Lag 0) between:\n")
+cat("1.", stat1, "\n")
+cat("2.", stat2, "\n")
+cat("======================================================\n")
+
+# Get all the scale names (e.g., "scale_1Hours", "scale_24Hours")
+scale_names <- names(all_clean_bins_lists[[stat1]])
+
+# Create an empty dataframe to store the results
+correlation_results <- data.frame(
+  Scale = character(),
+  Numeric_Hours = numeric(),
+  Valid_Bin_Pairs = integer(),
+  Correlation_Lag_0 = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Loop through each aggregation scale
+for (scale_name in scale_names) {
+  
+  # Extract the clean dataframes for both stations at this specific scale
+  df1 <- all_clean_bins_lists[[stat1]][[scale_name]]
+  df2 <- all_clean_bins_lists[[stat2]][[scale_name]]
+  
+  # Inner join by bin_id ensures we only compare pairs where BOTH stations have valid data
+  joined_df <- inner_join(df1, df2, by = "bin_id", suffix = c("_1", "_2"))
+  
+  n_pairs <- nrow(joined_df)
+  
+  # Calculate correlation (requires at least 2 data points)
+  if (n_pairs > 1) {
+    corr_val <- cor(joined_df$bin_mean_precip_1, joined_df$bin_mean_precip_2, method = "pearson")
+  } else {
+    corr_val <- NA # Not enough data to correlate at this scale
+  }
+  
+  # Extract the number from "scale_XHours" so we can sort the final table logically
+  num_hours <- as.numeric(gsub("[^0-9]", "", scale_name))
+  
+  # Append the row to our results dataframe
+  correlation_results <- rbind(correlation_results, data.frame(
+    Scale = scale_name,
+    Numeric_Hours = num_hours,
+    Valid_Bin_Pairs = n_pairs,
+    Correlation_Lag_0 = corr_val
+  ))
+}
+
+# Sort the results from the smallest time scale to the largest
+correlation_results <- correlation_results %>% 
+  arrange(Numeric_Hours) %>%
+  select(-Numeric_Hours) # Remove the sorting column to keep the output clean
+
+# View the final table
+print(correlation_results)
+# Extract numbers from "scale_1Hours"
+correlation_results$Scale_num <- as.numeric(
+  gsub("scale_|Hours", "", correlation_results$Scale)
+)
+
+
+```
+
+```{r}
+library(ggplot2)
+
+# 1. Recreate the numeric hours column for a proper continuous x-axis
+correlation_results$Hours <- as.numeric(gsub("[^0-9]", "", correlation_results$Scale))
+
+# 2. Generate the plot
+corr_plot <- ggplot(correlation_results, aes(x = Hours, y = Correlation_Lag_0)) +
+  geom_point(aes(size = Valid_Bin_Pairs), color = "darkred", alpha = 0.7) +
+  theme_minimal() +
+# scale_x_log10() + 
+  labs(
+    title = "Zero-Lag Cross-Correlation vs. Aggregation Scale",
+    subtitle = paste("Between", stat1, "and", stat2),
+    x = "Aggregation Scale (Hours)",
+    y = "Pearson Correlation (Lag 0)",
+    size = "Valid Bin Pairs\n(Sample Size)"
+  ) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    legend.position = "right"
+  )
+
+# 3. Display the plot
+print(corr_plot)
+```
 
 
