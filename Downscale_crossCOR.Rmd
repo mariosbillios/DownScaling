@@ -1,0 +1,162 @@
+```{r message=FALSE, warning=FALSE}
+library(dplyr)
+library(readxl)
+library(ggplot2)
+library(lubridate)
+library(DEoptim)
+library(lmomco)
+library(DEoptim)
+```
+
+
+```{r}
+
+# =====================================================================
+# MAIN EXECUTION SCRIPT
+# =====================================================================
+
+# 1. Setup Paths (Your existing logic)
+gdrive_path <- paste(LETTERS[file.exists(paste0(LETTERS, ":/My Drive"))], ":/My Drive", sep = "")
+project_path <- file.path(gdrive_path, "Academic_git/DownScaling")
+generalData_path <- file.path(gdrive_path, "General_Data")
+
+# 2. Define the source data directory (e.g., for Germany)
+data_dir <- file.path(generalData_path, "GSDR/QC_d data - Germany")
+
+# 3. DYNAMICALLY CREATE EXPORT DIRECTORY NAME
+# basename(data_dir) extracts "QC_d data - Germany"
+folder_name <- basename(data_dir)
+folder_name <- sub(".*- ", "", folder_name)
+
+export_folder_name <- paste("Cross_Corr_Downs", folder_name)
+
+# 4. Define the full individual_dir path
+individual_dir <- file.path(project_path, export_folder_name)
+
+# 5. Create the directory on your drive if it doesn't exist yet
+if (!dir.exists(individual_dir)) {
+  dir.create(individual_dir, recursive = TRUE)
+  message("Created new directory: ", individual_dir)
+}
+
+# 6. Locate Station Files
+station_files <- list.files(path = data_dir, pattern = "\\.txt$", full.names = TRUE)
+```
+
+
+
+```{r}
+all_stations_results <- list()
+
+for (current_station_file in station_files[1:2]) {
+  
+  station_name <- tools::file_path_sans_ext(basename(current_station_file))
+  cat("\nProcessing station:", station_name, "\n")
+  
+  # Read Header for Timestamps
+  header_lines <- readLines(current_station_file, n = 21)
+  start_date_str <- sub("Start datetime: ", "", grep("^Start datetime:", header_lines, value = TRUE))
+  end_date_str   <- sub("End datetime: ", "", grep("^End datetime:", header_lines, value = TRUE))
+  
+  # --- TIME GRID ALIGNMENT (Snapping to 00:00:00) ---
+  raw_start <- ymd_h(start_date_str)
+  raw_end   <- ymd_h(end_date_str)
+  
+  # Floor the start to the beginning of the day to align different stations
+  snapped_start <- floor_date(raw_start, unit = "day")
+  full_date_seq <- seq(snapped_start, raw_end, by = "hour")
+  
+  # Read Data
+  df_raw <- read.table(current_station_file, skip = 21, col.names = "precip")
+  df_raw$precip[df_raw$precip == -999] <- NA
+  
+  # Pad the beginning if the station started after midnight
+  padding_needed <- as.numeric(difftime(raw_start, snapped_start, units = "hours"))
+  if (padding_needed > 0) {
+    df <- data.frame(precip = c(rep(NA, padding_needed), df_raw$precip))
+  } else {
+    df <- df_raw
+  }
+  
+  df$date <- full_date_seq[1:nrow(df)] # Assign aligned dates
+  
+  # --- 3. CONVERT TO AVERAGED PROCESS ---
+  Base_time_chunks_per_hour <- 4
+  df$precip_rate <- df$precip / Base_time_chunks_per_hour
+  df$hour_index <- 0:(nrow(df) - 1)
+  
+  # --- 4. AGGREGATE ACROSS SCALES ---
+  empirical_k_training <- seq(1:10) * 24 * Base_time_chunks_per_hour
+  empirical_k_validation <- seq(1:23) * Base_time_chunks_per_hour
+  all_k <- sort(unique(c(empirical_k_validation, empirical_k_training)))
+  
+  station_scales <- list()
+  
+  for (k_val in all_k) {
+    agg_length <- k_val / Base_time_chunks_per_hour
+    
+    valid_bins <- df %>%
+      mutate(bin_id = hour_index %/% agg_length) %>%
+      group_by(bin_id) %>%
+      summarise(
+        hours_in_bin = n(),
+        bin_mean_precip = mean(precip_rate, na.rm = FALSE),
+        agg_date = min(date),
+        .groups = "drop"
+      ) %>%
+      # Ensure bin is full and has no missing values
+     filter( !is.na(bin_mean_precip)) %>%
+      #filter(hours_in_bin == agg_length & !is.na(bin_mean_precip)) %>%
+      select(agg_date, bin_mean_precip)
+    
+    list_name <- paste0("scale_", agg_length, "Hours")
+    station_scales[[list_name]] <- valid_bins
+  }
+  
+  all_stations_results[[station_name]] <- station_scales
+}
+
+# =====================================================================
+# 3. CROSS-CORRELATION CALCULATION (LAG-0)
+# =====================================================================
+st1_name <- names(all_stations_results)[1]
+st2_name <- names(all_stations_results)[2]
+
+common_scales <- intersect(names(all_stations_results[[st1_name]]), 
+                           names(all_stations_results[[st2_name]]))
+
+cross_corr_results <- data.frame(Scale_Hours = numeric(), Correlation = numeric())
+
+for (scale_name in common_scales) {
+  
+  d1 <- all_stations_results[[st1_name]][[scale_name]]
+  d2 <- all_stations_results[[st2_name]][[scale_name]]
+  
+  # Merge on agg_date to ensure we compare the exact same time windows
+  matched_data <- inner_join(d1, d2, by = "agg_date", suffix = c("_st1", "_st2"))
+  
+  # Calculate hours from scale name for sorting (e.g., "scale_24Hours" -> 24)
+  h_val <- as.numeric(gsub("scale_|Hours", "", scale_name))
+  
+  if (nrow(matched_data) > 5) { # Need a minimum number of points for valid correlation
+    c_val <- cor(matched_data$bin_mean_precip_st1, matched_data$bin_mean_precip_st2)
+  } else {
+    c_val <- NA
+  }
+  
+  cross_corr_results <- rbind(cross_corr_results, 
+                              data.frame(Scale_Hours = h_val, Correlation = c_val))
+}
+
+# Sort by scale for easier reading
+cross_corr_results <- cross_corr_results[order(cross_corr_results$Scale_Hours), ]
+
+# Final Output
+print(cross_corr_results)
+
+plot(cross_corr_results)
+
+```
+
+
+
