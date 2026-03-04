@@ -1,17 +1,11 @@
-# =====================================================================
-# LIBRARIES (Ensure you have these loaded based on your functions)
-# =====================================================================
+
 library(dplyr)
 library(lubridate)
 library(lmomco)
 library(DEoptim)
 library(tools)
 
-# =====================================================================
-# CORE MATHEMATICAL & METRIC FUNCTIONS (Defined once outside the loop)
-# =====================================================================
 
-# -- 2-Parameter Functions (Interpolation Constraint) --
 H_W_2p <- function(k, H0, k_star, q_k_star, a) {
  power_exponent <- (k / k_star)^a
  base_fraction <- q_k_star / H0
@@ -26,7 +20,7 @@ H_L_2p <- function(k, H0, k_star, q_k_star, b) {
  H0 * (base_fraction ^ power_exponent)
 }
 
-# -- 1-Parameter Functions (Probability Dry, H0 fixed internally to 1) --
+
 H_W_1p_pdry <- function(k, k_star, q_k_star, a) {
  H0 <- 1 
  power_exponent <- (k / k_star)^a
@@ -43,48 +37,39 @@ H_L_1p_pdry <- function(k, k_star, q_k_star, b) {
  H0 * (base_fraction ^ power_exponent)
 }
 
-# -- MSE Functions --
+
 mse_W_2p <- function(par, k, y, k_star, q_k_star) mean((y - H_W_2p(k, par[1], k_star, q_k_star, par[2]))^2, na.rm=TRUE)
 mse_L_2p <- function(par, k, y, k_star, q_k_star) mean((y - H_L_2p(k, par[1], k_star, q_k_star, par[2]))^2, na.rm=TRUE)
 
 mse_W_1p <- function(par, k, y, k_star, q_k_star) mean((y - H_W_1p_pdry(k, k_star, q_k_star, par[1]))^2, na.rm=TRUE)
 mse_L_1p <- function(par, k, y, k_star, q_k_star) mean((y - H_L_1p_pdry(k, k_star, q_k_star, par[1]))^2, na.rm=TRUE)
 
-# -- Metric Functions --
 calculate_mse <- function(actual, predicted) {
  mean((actual - predicted)^2, na.rm = TRUE)
 }
 
 # =====================================================================
-# MAIN EXECUTION SCRIPT
 # =====================================================================
 
-# 1. Setup Paths
+
 gdrive_path <- paste(LETTERS[file.exists(paste0(LETTERS, ":/My Drive"))], ":/My Drive", sep = "")
 project_path <- file.path(gdrive_path, "Academic_git/DownScaling")
 generalData_path <- file.path(gdrive_path, "General_Data")
 individual_dir <- file.path(project_path, "Station_Outputs") # Export directory
 
-# 2. Locate Station Files
+
 data_dir <- file.path(generalData_path, "GSDR/QC_d data - Germany")
 station_files <- list.files(path = data_dir, pattern = "\\.txt$", full.names = TRUE)
 
 # =====================================================================
-# AUTOMATED LOOP ACROSS ALL STATIONS
 # =====================================================================
-station_files<-station_files[1:3]
+station_files<-station_files[1:2]
 
 for (current_station_file in station_files) {
  
-  
-  
  # Extract current station name for export later
  station_name <- tools::file_path_sans_ext(basename(current_station_file))
- cat("\n======================================================\n")
- cat("Processing station:", station_name, "\n")
- cat("======================================================\n")
- 
- # Read Data
+
  df <- read.table(current_station_file, skip = 21, col.names = "precip")
  df$precip[df$precip == -999] <- NA
  
@@ -96,14 +81,14 @@ for (current_station_file in station_files) {
  end_ts <- ymd_h(end_date_str)
  df$date <- seq(start_ts, end_ts, by = "hour")
  
- # --- 3. CONVERT TO AVERAGED PROCESS ---
+
  Base_time_chunks_per_hour <- 4
  df$precip_rate <- df$precip / Base_time_chunks_per_hour
  df$hour_index <- 0:(nrow(df) - 1)
  
- # --- 4. AGGREGATE ---
+
  empirical_k_training <- seq(1:10) * 24 * Base_time_chunks_per_hour
- empirical_k_validation <- c(1,2,4,6,8,10,12) * Base_time_chunks_per_hour
+ empirical_k_validation <- seq(1:23) * Base_time_chunks_per_hour
  all_k <- c(empirical_k_validation, empirical_k_training)
  
  inspection_list <- list()
@@ -146,7 +131,10 @@ for (current_station_file in station_files) {
   x_pos <- x_all[x_all > 0]
   
   p_zero <- sum(x_all == 0) / length(x_all)
- 
+  mean_all <- mean(x_all, na.rm = TRUE)
+  var_all  <- var(x_all, na.rm = TRUE)
+  mean_pos <- ifelse(length(x_pos) > 0, mean(x_pos, na.rm = TRUE), NA)
+  var_pos  <- ifelse(length(x_pos) > 1, var(x_pos, na.rm = TRUE), NA)
   
   if (length(x_all) >= 4) {
    lm_all <- lmoms(x_all)
@@ -174,7 +162,9 @@ for (current_station_file in station_files) {
   
   scale_summary <- data.frame(
    scale = scale_name, p_zero = p_zero,
+   mean_all = mean_all, var_all = var_all,
    l1_all = l1_all, l2_all = l2_all, l3_all = l3_all, t2_all = t2_all, t3_all = t3_all, t4_all = t4_all,
+   mean_pos = mean_pos, var_pos = var_pos,
    l1_pos = l1_pos, l2_pos = l2_pos, l3_pos = l3_pos, t2_pos = t2_pos, t3_pos = t3_pos, t4_pos = t4_pos
   )
   summary_stats_list[[scale_name]] <- scale_summary
@@ -201,10 +191,10 @@ for (current_station_file in station_files) {
  all_fits_list <- list()
  de_ctrl <- DEoptim.control(
   trace = FALSE, 
-  itermax = 5000,   # Increased from 500 
-  NP = 500,          # Larger population for a more thorough search
-  reltol = 1e-11,    # Tighter tolerance for better precision
-  steptol = 500     # Number of steps to wait for improvement
+  itermax = 1000,   
+  NP = 50,         
+  reltol = 1e-11,    
+  steptol = 500     
  )
  
  for (stat in stats_to_fit) {
@@ -340,7 +330,19 @@ for (current_station_file in station_files) {
  
  cat("Successfully exported results for:", station_name, "\n")
  
-} # End of the for loop
+} 
+
+
+subset_data <- all_predictions[all_predictions$Statistic == "p_zero" & 
+                                all_predictions$Scale_k >= 1 & 
+                                all_predictions$Scale_k <= 23, ]
+
+
+mse_weibull_2p <- mean((subset_data$Actual - subset_data$Weibull_2p)^2, na.rm = TRUE)
+
+
+mse_weibull_1p <- mean((subset_data$Actual - subset_data$Weibull_1p)^2, na.rm = TRUE)
+
 
 
 

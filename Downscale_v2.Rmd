@@ -252,48 +252,35 @@ mse_L_1p <- function(par, k, y, k_star, q_k_star) mean((y - H_L_1p_pdry(k, k_sta
 k_obs <- fit_data$k_hours
 k_star <- 24
 
-# List of columns we want to optimize (excluding means, vars, and lambdas)
+
 stats_to_fit <- setdiff(names(fit_data), c(
   "scale", "k_hours", "mean_all", "var_all", "l1_all", "l2_all", "l3_all",
   "mean_pos", "var_pos", "l1_pos", "l2_pos", "l3_pos"
 ))
 
-# Store results
-all_fits_list <- list()
 
-# Turn off DEoptim printouts outside the loop to keep the console clean
+all_fits_list <- list()
 de_ctrl <- DEoptim.control(trace = FALSE, itermax = 500)
 
-# --- 4. Loop Through All Stats and Optimize ---
 for (stat in stats_to_fit) {
-  
   y_obs <- fit_data[[stat]]
-  
-  # Skip if all observations are NA
   if(all(is.na(y_obs))) next
-  
-  # Get empirical 24h value for the interpolation constraints (force single value)
   q_k_star <- fit_data[[stat]][fit_data$k_hours == k_star][1]
-  
-  # Safety check: If the anchor itself is missing, the math won't work. Skip stat.
   if(is.na(q_k_star)) next
-  
-  # Set up upper bounds dynamically based on the data
-  # Allow H0 to be up to 1 for p_zero, but let it scale up for other ratios (e.g. L-CV > 1)
   if (stat == "p_zero") {
     max_H0 <- 1
   } else {
     max_H0 <- 1
   }
   
-  # ----- Fit 2-Parameter Models -----
+
   fit_W_2p <- DEoptim(mse_W_2p, lower = c(1e-6, 1e-6), upper = c(max_H0, 1000), 
                       k = k_obs, y = y_obs, k_star = k_star, q_k_star = q_k_star, control = de_ctrl)
   
   fit_L_2p <- DEoptim(mse_L_2p, lower = c(1e-6, 1e-6), upper = c(max_H0, 1000), 
                       k = k_obs, y = y_obs, k_star = k_star, q_k_star = q_k_star, control = de_ctrl)
   
-  # Create a row of results
+
   res_row <- data.frame(
     Statistic = stat,
     Model = c("Weibull_2p", "PowerLaw_2p"),
@@ -302,8 +289,7 @@ for (stat in stats_to_fit) {
     Param_b = c(NA, fit_L_2p$optim$bestmem[2]),
     MSE = c(fit_W_2p$optim$bestval, fit_L_2p$optim$bestval)
   )
-  
-  # ----- Fit 1-Parameter Models (ONLY for p_zero) -----
+ 
   if (stat == "p_zero") {
     fit_W_1p <- DEoptim(mse_W_1p, lower = 1e-6, upper = 1000, 
                         k = k_obs, y = y_obs, k_star = k_star, q_k_star = q_k_star, control = de_ctrl)
@@ -314,7 +300,7 @@ for (stat in stats_to_fit) {
     res_1p <- data.frame(
       Statistic = stat,
       Model = c("Weibull_1p", "PowerLaw_1p"),
-      H0 = c(1, 1), # H0 is fixed to 1 for probability dry 1p models
+      H0 = c(1, 1), 
       Param_a = c(fit_W_1p$optim$bestmem[1], NA),
       Param_b = c(NA, fit_L_1p$optim$bestmem[1]),
       MSE = c(fit_W_1p$optim$bestval, fit_L_1p$optim$bestval)
@@ -322,11 +308,10 @@ for (stat in stats_to_fit) {
     res_row <- bind_rows(res_row, res_1p)
   }
   
-  # Append to master list
+ 
   all_fits_list[[stat]] <- res_row
 }
 
-# Combine everything into a clean final dataframe
 optimized_parameters_df <- bind_rows(all_fits_list)
 optimized_parameters_df_trial<-optimized_parameters_df
 ```
@@ -336,16 +321,12 @@ optimized_parameters_df_trial<-optimized_parameters_df
 ```{r}
 library(dplyr)
 
-# =====================================================================
-# 1. DEFINE METRICS
-# =====================================================================
 
-# Custom function to safely calculate Mean Absolute Percentage Error (MAPE)
+
 calculate_mape <- function(actual, predicted) {
-  # Standard MAPE formula: abs((actual - predicted) / actual)
-  # We use ifelse to handle exact zeros in 'actual' to avoid Inf/NaN errors.
+
   error_terms <- ifelse(actual == 0,
-                        ifelse(predicted == 0, 0, NA), # If both are 0, error is 0. Else ignore.
+                        ifelse(predicted == 0, 0, NA), 
                         abs((actual - predicted) / actual))
   
   # Return the mean percentage error
@@ -353,11 +334,6 @@ calculate_mape <- function(actual, predicted) {
 }
 
 
-# =====================================================================
-# 2. EVALUATE VALIDATION DATA (Hours 1-23)
-# =====================================================================
-
-# Filter empirical data for hours 1 to 23
 validation_data <- final_summary_df %>% 
   filter(k_hours < 24) %>% 
   arrange(k_hours)
@@ -365,10 +341,8 @@ validation_data <- final_summary_df %>%
 k_val <- validation_data$k_hours
 k_star <- 24
 
-# Extract the empirical 24-hour anchor for the 2p and 1p models
 empirical_24h <- final_summary_df %>% filter(k_hours == k_star)
 
-# Empty list to store validation rows
 validation_results_list <- list()
 
 for (i in 1:nrow(optimized_parameters_df)) {
@@ -384,28 +358,25 @@ for (i in 1:nrow(optimized_parameters_df)) {
   actual_vals <- validation_data[[stat]]
   q_k_star_val <- empirical_24h[[stat]]
   
-  # Skip if there's no actual validation data
   if (all(is.na(actual_vals))) {
     current_fit$MAPE_validation <- NA
     validation_results_list[[i]] <- current_fit
     next
   }
-  
-  # Generate predictions based on 2p and 1p models ONLY
-  predicted_vals <- switch(model_type,
-    "Weibull_2p"  = H_W_2p(k_val, H0_val, k_star, q_k_star_val, a_val),
-    "PowerLaw_2p" = H_L_2p(k_val, H0_val, k_star, q_k_star_val, b_val),
-    "Weibull_1p"  = H_W_1p_pdry(k_val, k_star, q_k_star_val, a_val),
+    predicted_vals <- switch(model_type,
+   "Weibull_2p"  = H_W_2p(k_val, H0_val, k_star, q_k_star_val, a_val),
+   
+   "PowerLaw_2p" = H_L_2p(k_val, H0_val, k_star, q_k_star_val, b_val),"Weibull_1p"  = H_W_1p_pdry(k_val, k_star, q_k_star_val, a_val),
     "PowerLaw_1p" = H_L_1p_pdry(k_val, k_star, q_k_star_val, b_val),
     rep(NA, length(k_val)) 
   )
   
-  # Calculate MAPE and append
+
   current_fit$MAPE_validation <- calculate_mape(actual_vals, predicted_vals)
   validation_results_list[[i]] <- current_fit
 }
 
-# Bind validation results and find the best models based on lowest MAPE
+
 final_evaluated_models <- bind_rows(validation_results_list)
 final_evaluated_models_trial<-final_evaluated_models
 
@@ -425,10 +396,10 @@ print(best_models)
 
 library(dplyr)
 
-# 1. Define the scales we want to predict
+
 k_empirical <- sort(unique(final_summary_df$k_hours))
 
-# Inject 0.25 (15 mins) at the very beginning of our prediction vector
+
 k_predict <- c(0.25, k_empirical) 
 k_star <- 24
 
@@ -436,32 +407,26 @@ predicted_list <- list()
 
 for (stat in unique(optimized_parameters_df$Statistic)) {
   
-  # Get empirical 24h anchor for this statistic
+
   q_k_star_val <- final_summary_df[[stat]][final_summary_df$k_hours == k_star]
   
-  # Get actual values. 
-  # Using 'match' will automatically and safely assign NA to the 0.25 scale 
-  # since it doesn't exist in final_summary_df$k_hours.
   actual_vals <- final_summary_df[[stat]][match(k_predict, final_summary_df$k_hours)]
   
-  # Filter params for this stat
+
   params <- optimized_parameters_df %>% filter(Statistic == stat)
   
-  # Initialize a dataframe for this statistic
   df_stat <- data.frame(
     Scale_k = k_predict,
     Statistic = stat,
     Actual = actual_vals
   )
-  
-  # Loop through each model fitted for this statistic and predict
+
   for (i in 1:nrow(params)) {
     m_name <- params$Model[i]
     H0_val <- params$H0[i]
     a_val <- params$Param_a[i]
     b_val <- params$Param_b[i]
-    
-    # Generate predictions based on 2p and 1p models ONLY
+   
     predicted_vals <- switch(m_name,
       "Weibull_2p"  = H_W_2p(k_predict, H0_val, k_star, q_k_star_val, a_val),
       "PowerLaw_2p" = H_L_2p(k_predict, H0_val, k_star, q_k_star_val, b_val),
@@ -476,7 +441,6 @@ for (stat in unique(optimized_parameters_df$Statistic)) {
   predicted_list[[stat]] <- df_stat
 }
 
-# Final dataframe containing all empirical vs predicted values
 all_predictions_df <- bind_rows(predicted_list)
 
 all_predictions_df_trial<-all_predictions_df
@@ -497,7 +461,7 @@ plot_statistic_dynamic <- function(stat_name, y_label = stat_name) {
     filter(!is.na(value)) %>%
     mutate(Data_Type = ifelse(k_hours >= 24, "Calib. data", "Valid. data"))
   
-  # Get dynamic maximum from your actual data
+
   max_k <- max(emp_data$k_hours, na.rm = TRUE)
   
   q_k_star_val <- emp_data$value[emp_data$k_hours == 24]
@@ -506,8 +470,7 @@ plot_statistic_dynamic <- function(stat_name, y_label = stat_name) {
     return(NULL) 
   }
   
-  # 2. Prepare Smooth Curves Data & Extrapolated Points
-  # Stretch from 0.25 (15 mins) up to max_k
+ 
   k_smooth <- exp(seq(log(0.25), log(max_k), length.out = 500))
   params <- optimized_parameters_df %>% filter(Statistic == stat_name)
   
@@ -519,8 +482,6 @@ plot_statistic_dynamic <- function(stat_name, y_label = stat_name) {
     H0_val <- params$H0[i]
     a_val <- params$Param_a[i]
     b_val <- params$Param_b[i]
-    
-    # Generate smooth line values
     pred_smooth <- switch(m_name,
       "Weibull_3p"  = H_W_3p(k_smooth, H0_val, a_val, b_val),
       "PowerLaw_3p" = H_L_3p(k_smooth, H0_val, a_val, b_val),
@@ -531,8 +492,7 @@ plot_statistic_dynamic <- function(stat_name, y_label = stat_name) {
     )
     
     smooth_lines_list[[i]] <- data.frame(Scale_k = k_smooth, Model = m_name, value = pred_smooth)
-    
-    # Generate specific extrapolated points for 0.25 scale
+   
     pred_025 <- switch(m_name,
       "Weibull_3p"  = H_W_3p(0.25, H0_val, a_val, b_val),
       "PowerLaw_3p" = H_L_3p(0.25, H0_val, a_val, b_val),
@@ -548,7 +508,6 @@ plot_statistic_dynamic <- function(stat_name, y_label = stat_name) {
   smooth_data <- bind_rows(smooth_lines_list)
   extra_data <- bind_rows(extra_points_list)
   
-  # Set up aesthetics
   line_colors <- c("Weibull_1p" = "blue", "PowerLaw_1p" = "red",
                    "Weibull_2p" = "blue", "PowerLaw_2p" = "red",
                    "Weibull_3p" = "darkblue", "PowerLaw_3p" = "darkred")
@@ -557,38 +516,23 @@ plot_statistic_dynamic <- function(stat_name, y_label = stat_name) {
                   "Weibull_2p" = "dashed", "PowerLaw_2p" = "dashed",
                   "Weibull_3p" = "dotted", "PowerLaw_3p" = "dotted")
   
-  # Create dynamic breaks starting at 0.25
   standard_breaks <- c(0.25, 1, 2, 4, 6, 12, 24, 48, 72, 96, 120, 168, 240, 360, 720, 1440)
   dynamic_breaks <- standard_breaks[standard_breaks <= max_k]
   if (!(max_k %in% dynamic_breaks)) dynamic_breaks <- c(dynamic_breaks, max_k)
   
-  # 3. Build the Plot
   p <- ggplot() +
-    # Smooth fitted lines
     geom_line(data = smooth_data, aes(x = Scale_k, y = value, color = Model, linetype = Model), linewidth = 1) +
-    
-    # Empirical data points (circles)
     geom_point(data = emp_data, aes(x = k_hours, y = value, fill = Data_Type), 
                shape = 21, color = "white", size = 3, stroke = 0.5) +
-    
-    # Extrapolated 0.25 scale predictions (stars)
-    # Using shape = 8 for a star/asterisk. show.legend = FALSE keeps the legend clean.
     geom_point(data = extra_data, aes(x = Scale_k, y = value, color = Model), 
                shape = 8, size = 3, stroke = 1, show.legend = FALSE) +
-    
-    # Anchor line
     geom_vline(xintercept = 24, linetype = "dashed", color = "darkgray", linewidth = 0.8) +
-    
-    # Apply dynamic breaks
     scale_x_log10(breaks = dynamic_breaks, labels = dynamic_breaks) +
-    
     scale_fill_manual(values = c("Calib. data" = "black", "Valid. data" = "orange")) +
     scale_color_manual(values = line_colors) +
     scale_linetype_manual(values = line_types) +
-    
     labs(x = "Temporal scale, k [h]", y = y_label, 
          fill = "Data", color = "Model", linetype = "Model") +
-    
     theme_bw() +
     theme(
       panel.grid.major = element_line(linetype = "dashed", color = "lightgray"),
@@ -602,7 +546,6 @@ plot_statistic_dynamic <- function(stat_name, y_label = stat_name) {
   return(p)
 }
 
-# Generate the plot
 plot_p_zero_all_scales <- plot_statistic_dynamic("p_zero", y_label = expression(p[0]^{(k)}))
 print(plot_p_zero_all_scales)
 ```
