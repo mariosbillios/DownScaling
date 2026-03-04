@@ -19,7 +19,7 @@ generalData_path <- file.path(gdrive_path,"General_Data")
 ```{r}
 
 # --- 1 & 2. READ DATA AND DATES ---
-file_path <- file.path(generalData_path, "/GSDR/QC_d data - Germany/DE_00020.txt")
+file_path <- file.path(generalData_path, "/GSDR/QC_d data - Germany/DE_00003.txt")
 df <- read.table(file_path, skip =21, col.names = "precip")
 
 df$precip[df$precip == -999] <- NA
@@ -35,56 +35,59 @@ end_ts <- ymd_h(end_date_str)
 df$date <- seq(start_ts, end_ts, by = "hour")
 
 
-# --- 3. CONVERT TO AVERAGED PROCESS ---
-#We have hourly data and we want to extrapolate to 15 mins.
-#The 15 mins are scale k=1 so hourly data k=4
-#Base_time_chunks = 15 mins
-#The daily data are a sum of 4 base time chunks (=15 mins) so we need to make them in an average process. Divide by 4
 
 
 Base_time_chunks_per_hour <- 4
-df$precip_rate <- df$precip / Base_time_chunks_per_hour
+df$precip_rate <- df$precip 
 df$hour_index <- 0:(nrow(df) - 1)
 
-# --- 4. AGGREGATE ---
-# I  will fit the data  in the empirical data coming from 1 to 10 days mean aggregation 
-# T will validate the fitted curve in the empirical data from 1 to 12 hours
-# However i have daily data. The aggregation needs to be in that scale 
-
-empirical_k_training <- seq(1:10)*24* Base_time_chunks_per_hour
-empirical_k_validation <- seq(1:23) * Base_time_chunks_per_hour
-all_k<-c(empirical_k_validation,empirical_k_training)
 
 
-# Create an empty list to store our inspection dataframes
+all_k<-c(1:12,24,24*2,24*3,24*4,24*5,24*9,24*10)
+
+
+
 inspection_list <- list()
 
 for (i in seq_along(all_k)) {
- 
-
- # I have hourly data. The aggregation needs to be in that scale. Meaning
- # if i want the scale k=8 (4*8= 48mins =2 days) i need to aggregate the
- # hourly data by 2. Thats why i divide by 4 so the aggregation length to be in hours 
-
-  agg_length <-all_k[i]/Base_time_chunks_per_hour
-
-
+  
+  agg_length <- all_k[i]
+  
+  # 1. Define the NA tolerance based on the scale
+  if (agg_length <= 12) {
+    max_na_allowed <- 0
+  } else {
+    # Linear interpolation: starts at 1 NA for 24h, ends at 3 NAs for 240h
+    # Formula: y = y1 + (x - x1) * ((y2 - y1) / (x2 - x1))
+    max_na_allowed <- round(1 + (agg_length - 24) * ((3 - 1) / (240 - 24)))
+  }
+  
+  # 2. Apply the aggregation with the new logic
   df_detailed <- df %>%
     mutate(bin_id = hour_index %/% agg_length) %>%
     group_by(bin_id) %>%
     mutate(
       hours_in_bin = n(),
-      bin_mean_precip = mean(precip_rate, na.rm = FALSE),
+      # Count exactly how many NAs are in this specific bin
+      na_count = sum(is.na(precip_rate)), 
+      
+      # Calculate mean conditionally
+      bin_mean_precip = ifelse(
+        na_count <= max_na_allowed, 
+        mean(precip_rate, na.rm = TRUE), # If within tolerance, ignore NAs to get the mean
+        NA_real_                         # If tolerance exceeded, the bin is invalid (NA)
+      ),
+      
       is_valid_bin = (!is.na(bin_mean_precip) & hours_in_bin == agg_length)
     ) %>%
-    ungroup()
+    ungroup() %>%
+    # Clean up the temporary na_count column so it doesn't clutter your dataframe
+    select(-na_count) 
   
-  # Save the dataframe to our list for later inspection
+  # Save the dataframe to our list
   list_name <- paste0("scale_", agg_length, "Hours")
   inspection_list[[list_name]] <- df_detailed
-  
 }
-
 
 clean_bins_list <- list()
 
@@ -212,14 +215,14 @@ H_L_2p <- function(k, H0, k_star, q_k_star, b) {
 
 # -- 1-Parameter Functions (Probability Dry, H0 fixed internally to 1) --
 H_W_1p_pdry <- function(k, k_star, q_k_star, a) {
-  H0 <- 1 
+  H0 <- 0.99
   power_exponent <- (k / k_star)^a
   base_fraction <- q_k_star / H0
   H0 * (base_fraction ^ power_exponent)
 }
 
 H_L_1p_pdry <- function(k, k_star, q_k_star, b) {
-  H0 <- 1 
+  H0 <- 0.99
   ln_numerator <- log(1 + b * k)
   ln_denominator <- log(1 + b * k_star)
   power_exponent <- ln_numerator / ln_denominator
@@ -452,8 +455,12 @@ all_predictions_df_trial<-all_predictions_df
 ```{r}
 library(ggplot2)
 library(dplyr)
+library(patchwork)
 
-plot_statistic_dynamic <- function(stat_name, y_label = stat_name) {
+global_expected_models <- unique(optimized_parameters_df$Model)
+global_expected_data   <- c("Calib. data", "Valid. data")
+
+plot_statistic_dynamic <- function(stat_name, y_label = stat_name, show_legend = FALSE) {
   
   # 1. Prepare Empirical Data points
   emp_data <- final_summary_df %>%
@@ -461,7 +468,6 @@ plot_statistic_dynamic <- function(stat_name, y_label = stat_name) {
     filter(!is.na(value)) %>%
     mutate(Data_Type = ifelse(k_hours >= 24, "Calib. data", "Valid. data"))
   
-
   max_k <- max(emp_data$k_hours, na.rm = TRUE)
   
   q_k_star_val <- emp_data$value[emp_data$k_hours == 24]
@@ -470,18 +476,16 @@ plot_statistic_dynamic <- function(stat_name, y_label = stat_name) {
     return(NULL) 
   }
   
- 
-  k_smooth <- exp(seq(log(0.25), log(max_k), length.out = 500))
+  k_smooth <- exp(seq(log(1), log(max_k), length.out = 500))
   params <- optimized_parameters_df %>% filter(Statistic == stat_name)
   
   smooth_lines_list <- list()
-  extra_points_list <- list()
-  
   for (i in 1:nrow(params)) {
     m_name <- params$Model[i]
     H0_val <- params$H0[i]
-    a_val <- params$Param_a[i]
-    b_val <- params$Param_b[i]
+    a_val  <- params$Param_a[i]
+    b_val  <- params$Param_b[i]
+    
     pred_smooth <- switch(m_name,
       "Weibull_3p"  = H_W_3p(k_smooth, H0_val, a_val, b_val),
       "PowerLaw_3p" = H_L_3p(k_smooth, H0_val, a_val, b_val),
@@ -490,23 +494,10 @@ plot_statistic_dynamic <- function(stat_name, y_label = stat_name) {
       "Weibull_1p"  = H_W_1p_pdry(k_smooth, 24, q_k_star_val, a_val),
       "PowerLaw_1p" = H_L_1p_pdry(k_smooth, 24, q_k_star_val, b_val)
     )
-    
     smooth_lines_list[[i]] <- data.frame(Scale_k = k_smooth, Model = m_name, value = pred_smooth)
-   
-    pred_025 <- switch(m_name,
-      "Weibull_3p"  = H_W_3p(0.25, H0_val, a_val, b_val),
-      "PowerLaw_3p" = H_L_3p(0.25, H0_val, a_val, b_val),
-      "Weibull_2p"  = H_W_2p(0.25, H0_val, 24, q_k_star_val, a_val),
-      "PowerLaw_2p" = H_L_2p(0.25, H0_val, 24, q_k_star_val, b_val),
-      "Weibull_1p"  = H_W_1p_pdry(0.25, 24, q_k_star_val, a_val),
-      "PowerLaw_1p" = H_L_1p_pdry(0.25, 24, q_k_star_val, b_val)
-    )
-    
-    extra_points_list[[i]] <- data.frame(Scale_k = 0.25, Model = m_name, value = pred_025)
   }
   
   smooth_data <- bind_rows(smooth_lines_list)
-  extra_data <- bind_rows(extra_points_list)
   
   line_colors <- c("Weibull_1p" = "blue", "PowerLaw_1p" = "red",
                    "Weibull_2p" = "blue", "PowerLaw_2p" = "red",
@@ -516,37 +507,65 @@ plot_statistic_dynamic <- function(stat_name, y_label = stat_name) {
                   "Weibull_2p" = "dashed", "PowerLaw_2p" = "dashed",
                   "Weibull_3p" = "dotted", "PowerLaw_3p" = "dotted")
   
-  standard_breaks <- c(0.25, 1, 2, 4, 6, 12, 24, 48, 72, 96, 120, 168, 240, 360, 720, 1440)
-  dynamic_breaks <- standard_breaks[standard_breaks <= max_k]
-  if (!(max_k %in% dynamic_breaks)) dynamic_breaks <- c(dynamic_breaks, max_k)
+  custom_breaks <- c(1, 6, 12, 24, 120, 240)
+  custom_breaks <- custom_breaks[custom_breaks <= max_k] 
   
+  # --- UPDATED GUIDES ---
+  # Data on the left (order=1, 1 column), Models on the right (order=2, 2 rows)
+  fill_guide  <- if(show_legend) guide_legend(order = 1, ncol = 1) else "none"
+  line_guide  <- if(show_legend) guide_legend(order = 2, nrow = 2) else "none"
+
   p <- ggplot() +
     geom_line(data = smooth_data, aes(x = Scale_k, y = value, color = Model, linetype = Model), linewidth = 1) +
     geom_point(data = emp_data, aes(x = k_hours, y = value, fill = Data_Type), 
                shape = 21, color = "white", size = 3, stroke = 0.5) +
-    geom_point(data = extra_data, aes(x = Scale_k, y = value, color = Model), 
-               shape = 8, size = 3, stroke = 1, show.legend = FALSE) +
+    scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.2)) + 
     geom_vline(xintercept = 24, linetype = "dashed", color = "darkgray", linewidth = 0.8) +
-    scale_x_log10(breaks = dynamic_breaks, labels = dynamic_breaks) +
-    scale_fill_manual(values = c("Calib. data" = "black", "Valid. data" = "orange")) +
-    scale_color_manual(values = line_colors) +
-    scale_linetype_manual(values = line_types) +
-    labs(x = "Temporal scale, k [h]", y = y_label, 
-         fill = "Data", color = "Model", linetype = "Model") +
+    scale_x_log10(breaks = custom_breaks, labels = custom_breaks) +
+    
+    scale_fill_manual(name = "", values = c("Calib. data" = "black", "Valid. data" = "orange"),
+                      limits = global_expected_data, drop = FALSE, guide = fill_guide) +
+    scale_color_manual(name = "", values = line_colors, limits = global_expected_models, 
+                       drop = FALSE, guide = line_guide) +
+    scale_linetype_manual(name = "", values = line_types, limits = global_expected_models, 
+                          drop = FALSE, guide = line_guide) +
+    
+    labs(x = "Temporal scale, k [h]", y = y_label) +
     theme_bw() +
     theme(
       panel.grid.major = element_line(linetype = "dashed", color = "lightgray"),
       panel.grid.minor = element_blank(),
-      legend.position = c(0.2, 0.2), 
-      legend.background = element_rect(color = "black", fill = "white"),
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+      axis.text.y = element_text(angle = 90, vjust = 0.5, hjust = 0.5),
       legend.key = element_blank(),
-      legend.title = element_blank()
+      legend.background = element_blank()
     )
   
   return(p)
 }
 
-plot_p_zero_all_scales <- plot_statistic_dynamic("p_zero", y_label = expression(p[0]^{(k)}))
-print(plot_p_zero_all_scales)
+# 2. Generate plots
+plot_p_zero <- plot_statistic_dynamic("p_zero", y_label = expression(p[0]^{(k)}), show_legend = TRUE)
+plot_t2     <- plot_statistic_dynamic("t2_pos", y_label = expression(t[2]^{(k)}))
+plot_t3     <- plot_statistic_dynamic("t3_pos", y_label = expression(t[3]^{(k)}))
+plot_t4     <- plot_statistic_dynamic("t4_pos", y_label = expression(t[4]^{(k)}))
+
+# 3. Combine with Patchwork
+combined_plot <- (plot_p_zero | plot_t2) / (plot_t3 | plot_t4) + 
+  plot_layout(guides = "collect") & 
+  theme(
+    legend.position = "bottom",
+    legend.box = "horizontal",     # Side-by-side groups
+    legend.box.just = "left",
+    legend.spacing.x = unit(0.5, "cm")
+  )
+
+print(combined_plot)
 ```
+
+
+```{r}
+saveRDS(all_predictions_df,"test.rds")
+```
+
 

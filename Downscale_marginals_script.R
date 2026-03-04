@@ -63,7 +63,7 @@ station_files <- list.files(path = data_dir, pattern = "\\.txt$", full.names = T
 
 # =====================================================================
 # =====================================================================
-station_files<-station_files[1:2]
+station_files<-station_files[1:3]
 
 for (current_station_file in station_files) {
  
@@ -83,32 +83,52 @@ for (current_station_file in station_files) {
  
 
  Base_time_chunks_per_hour <- 4
- df$precip_rate <- df$precip / Base_time_chunks_per_hour
+ df$precip_rate <- df$precip 
  df$hour_index <- 0:(nrow(df) - 1)
  
-
- empirical_k_training <- seq(1:10) * 24 * Base_time_chunks_per_hour
- empirical_k_validation <- seq(1:23) * Base_time_chunks_per_hour
  all_k <- c(empirical_k_validation, empirical_k_training)
  
  inspection_list <- list()
- 
- for (i in seq_along(all_k)) {
-  agg_length <- all_k[i] / Base_time_chunks_per_hour
+
+for (i in seq_along(all_k)) {
   
+  agg_length <- all_k[i]
+  
+  # 1. Define the NA tolerance based on the scale
+  if (agg_length <= 12) {
+    max_na_allowed <- 0
+  } else {
+    # Linear interpolation: starts at 1 NA for 24h, ends at 3 NAs for 240h
+    # Formula: y = y1 + (x - x1) * ((y2 - y1) / (x2 - x1))
+    max_na_allowed <- round(1 + (agg_length - 24) * ((3 - 1) / (240 - 24)))
+  }
+  
+  # 2. Apply the aggregation with the new logic
   df_detailed <- df %>%
-   mutate(bin_id = hour_index %/% agg_length) %>%
-   group_by(bin_id) %>%
-   mutate(
-    hours_in_bin = n(),
-    bin_mean_precip = mean(precip_rate, na.rm = FALSE),
-    is_valid_bin = (!is.na(bin_mean_precip) & hours_in_bin == agg_length)
-   ) %>%
-   ungroup()
+    mutate(bin_id = hour_index %/% agg_length) %>%
+    group_by(bin_id) %>%
+    mutate(
+      hours_in_bin = n(),
+      # Count exactly how many NAs are in this specific bin
+      na_count = sum(is.na(precip_rate)), 
+      
+      # Calculate mean conditionally
+      bin_mean_precip = ifelse(
+        na_count <= max_na_allowed, 
+        mean(precip_rate, na.rm = TRUE), # If within tolerance, ignore NAs to get the mean
+        NA_real_                         # If tolerance exceeded, the bin is invalid (NA)
+      ),
+      
+      is_valid_bin = (!is.na(bin_mean_precip) & hours_in_bin == agg_length)
+    ) %>%
+    ungroup() %>%
+    # Clean up the temporary na_count column so it doesn't clutter your dataframe
+    select(-na_count) 
   
+  # Save the dataframe to our list
   list_name <- paste0("scale_", agg_length, "Hours")
   inspection_list[[list_name]] <- df_detailed
- }
+}
  
  clean_bins_list <- list()
  for (scale_name in names(inspection_list)) {
