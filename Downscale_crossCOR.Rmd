@@ -92,7 +92,7 @@ cat("======================================================\n")
 # --- 4. PASS TWO: FILTER AND AGGREGATE ---
 Base_time_chunks_per_hour <- 4
 empirical_k_training <- seq(1:10) * 24 * Base_time_chunks_per_hour
-empirical_k_validation <- seq(1:23) * Base_time_chunks_per_hour
+empirical_k_validation <- c(1,2,4,6,8,10,12) * Base_time_chunks_per_hour
 all_k <- c(empirical_k_validation, empirical_k_training)
 
 for (station_name in names(raw_data_list)) {
@@ -150,16 +150,6 @@ for (station_name in names(raw_data_list)) {
 
 
 ```
-
-
-```{r}
-
-```
-
-
-
-
-
 
 
 
@@ -234,31 +224,337 @@ correlation_results$Scale_num <- as.numeric(
 
 ```
 
+
+
+```{r}
+# =====================================================================
+# CROSS-CORRELATION FUNCTIONS (Monotonically Increasing)
+# =====================================================================
+
+# -- 2-Parameter Functions --
+# Equation (10): Weibull-H>
+H_W_2p_cross <- function(k, H_inf, k_star, q_k_star, a) {
+  exponent <- (k / k_star)^a
+  base_fraction <- 1 - (q_k_star / H_inf)
+  
+  # Ensure base is not negative to avoid NaN issues in R
+  base_fraction <- ifelse(base_fraction <= 0, 1e-6, base_fraction) 
+  
+  H_inf * (1 - (base_fraction ^ exponent))
+}
+
+# Equation (11): Lomax-H>
+H_L_2p_cross <- function(k, H_inf, k_star, q_k_star, b) {
+  ln_numerator <- log(1 + b * k)
+  ln_denominator <- log(1 + b * k_star)
+  exponent <- ln_numerator / ln_denominator
+  base_fraction <- 1 - (q_k_star / H_inf)
+  
+  base_fraction <- ifelse(base_fraction <= 0, 1e-6, base_fraction)
+  
+  H_inf * (1 - (base_fraction ^ exponent))
+}
+
+# -- 1-Parameter Functions (Assuming H_inf = 1) --
+H_W_1p_cross <- function(k, k_star, q_k_star, a) {
+  H_inf <- 1 
+  exponent <- (k / k_star)^a
+  base_fraction <- 1 - (q_k_star / H_inf)
+  
+  base_fraction <- ifelse(base_fraction <= 0, 1e-6, base_fraction)
+  
+  H_inf * (1 - (base_fraction ^ exponent))
+}
+
+H_L_1p_cross <- function(k, k_star, q_k_star, b) {
+  H_inf <- 1 
+  ln_numerator <- log(1 + b * k)
+  ln_denominator <- log(1 + b * k_star)
+  exponent <- ln_numerator / ln_denominator
+  base_fraction <- 1 - (q_k_star / H_inf)
+  
+  base_fraction <- ifelse(base_fraction <= 0, 1e-6, base_fraction)
+  
+  H_inf * (1 - (base_fraction ^ exponent))
+}
+
+# -- MSE Functions for Optimization --
+mse_W_2p_cross <- function(par, k, y, k_star, q_k_star) mean((y - H_W_2p_cross(k, par[1], k_star, q_k_star, par[2]))^2, na.rm=TRUE)
+mse_L_2p_cross <- function(par, k, y, k_star, q_k_star) mean((y - H_L_2p_cross(k, par[1], k_star, q_k_star, par[2]))^2, na.rm=TRUE)
+
+mse_W_1p_cross <- function(par, k, y, k_star, q_k_star) mean((y - H_W_1p_cross(k, k_star, q_k_star, par[1]))^2, na.rm=TRUE)
+mse_L_1p_cross <- function(par, k, y, k_star, q_k_star) mean((y - H_L_1p_cross(k, k_star, q_k_star, par[1]))^2, na.rm=TRUE)
+```
+
+
+
+```{r}
+
+# Assuming your raw dataframe is named 'correlation_results'
+fit_data <- correlation_results %>%
+  # Rename the columns to match what the optimization script expects
+  rename(
+    k_hours = Scale_num, 
+    cross_corr = Correlation_Lag_0
+  ) %>%
+  # Keep only the columns necessary for fitting
+  select(k_hours, cross_corr) %>%
+  # Ensure it is strictly sorted from smallest to largest time scale
+  arrange(k_hours)
+
+# View the formatted data
+head(fit_data)
+
+
+
+# =====================================================================
+# 1. SPLIT DATA: TRAINING (>= 24h) & VALIDATION (< 24h)
+# =====================================================================
+k_star <- 24
+
+# Filter data into calibration and validation sets
+training_data <- fit_data %>% filter(k_hours >= k_star) %>% arrange(k_hours)
+validation_data <- fit_data %>% filter(k_hours < k_star & k_hours >= 1) %>% arrange(k_hours)
+
+# Extract variables for DEoptim
+k_obs <- training_data$k_hours
+y_obs <- training_data$cross_corr
+q_k_star <- training_data$cross_corr[training_data$k_hours == k_star][1]
+
+# =====================================================================
+# 2. FIT MODELS (Using ONLY Training Data)
+# =====================================================================
+de_ctrl <- DEoptim.control(
+  trace = FALSE, 
+  itermax = 5000,   # Increased from 500 
+  NP = 500,          # Larger population for a more thorough search
+  reltol = 1e-11,    # Tighter tolerance for better precision
+  steptol = 500     # Number of steps to wait for improvement
+ )
+
+# Bounds for H_inf: Must be strictly > q_k_star and <= 1.0
+lower_bounds_2p <- c( 1e-5, 1e-6) # [H_inf, shape_parameter]
+upper_bounds_2p <- c(1.0, 1000)
+
+# 2-Parameter Fits
+fit_W_2p <- DEoptim(mse_W_2p_cross, lower = lower_bounds_2p, upper = upper_bounds_2p, 
+                    k = k_obs, y = y_obs, k_star = k_star, q_k_star = q_k_star, control = de_ctrl)
+
+fit_L_2p <- DEoptim(mse_L_2p_cross, lower = lower_bounds_2p, upper = upper_bounds_2p, 
+                    k = k_obs, y = y_obs, k_star = k_star, q_k_star = q_k_star, control = de_ctrl)
+
+# 1-Parameter Fits (H_inf fixed to 1 internally)
+fit_W_1p <- DEoptim(mse_W_1p_cross, lower = 1e-6, upper = 1000, 
+                    k = k_obs, y = y_obs, k_star = k_star, q_k_star = q_k_star, control = de_ctrl)
+
+fit_L_1p <- DEoptim(mse_L_1p_cross, lower = 1e-6, upper = 1000, 
+                    k = k_obs, y = y_obs, k_star = k_star, q_k_star = q_k_star, control = de_ctrl)
+
+# Compile optimized parameters into a clean dataframe
+optimized_params <- data.frame(
+  Model = c("Weibull_2p", "PowerLaw_2p", "Weibull_1p", "PowerLaw_1p"),
+  H_inf = c(fit_W_2p$optim$bestmem[1], fit_L_2p$optim$bestmem[1], 1, 1),
+  Param_shape = c(fit_W_2p$optim$bestmem[2], fit_L_2p$optim$bestmem[2], 
+                  fit_W_1p$optim$bestmem[1], fit_L_1p$optim$bestmem[1]),
+  Training_MSE = c(fit_W_2p$optim$bestval, fit_L_2p$optim$bestval, 
+                   fit_W_1p$optim$bestval, fit_L_1p$optim$bestval)
+)
+
+# =====================================================================
+# 3. VALIDATE ON SUB-DAILY SCALES (1 to 23 hours)
+# =====================================================================
+k_val <- validation_data$k_hours
+y_val_actual <- validation_data$cross_corr
+
+# Calculate predictions for the validation data
+pred_W_2p_val <- H_W_2p_cross(k_val, optimized_params$H_inf[1], k_star, q_k_star, optimized_params$Param_shape[1])
+pred_L_2p_val <- H_L_2p_cross(k_val, optimized_params$H_inf[2], k_star, q_k_star, optimized_params$Param_shape[2])
+pred_W_1p_val <- H_W_1p_cross(k_val, k_star, q_k_star, optimized_params$Param_shape[3])
+pred_L_1p_val <- H_L_1p_cross(k_val, k_star, q_k_star, optimized_params$Param_shape[4])
+
+# Calculate Validation MSE and add it to our parameters dataframe
+optimized_params$Validation_MSE <- c(
+  mean((y_val_actual - pred_W_2p_val)^2, na.rm = TRUE),
+  mean((y_val_actual - pred_L_2p_val)^2, na.rm = TRUE),
+  mean((y_val_actual - pred_W_1p_val)^2, na.rm = TRUE),
+  mean((y_val_actual - pred_L_1p_val)^2, na.rm = TRUE)
+)
+
+print(optimized_params)
+
+# =====================================================================
+# 4. EXTRAPOLATE DOWN TO 15 MINS AND COMPILE FINAL PREDICTIONS
+# =====================================================================
+# Create a master sequence of k values: 0.25 (15 mins), validation scales, and training scales
+k_all <- c(0.25, validation_data$k_hours, training_data$k_hours)
+
+all_predictions <- data.frame(
+  k_hours = k_all,
+  # We use NA for 0.25 because we don't have actual empirical data for it
+  Actual_Corr = c(NA, validation_data$cross_corr, training_data$cross_corr) 
+)
+
+# Generate predictions across all scales for all models
+all_predictions$Weibull_2p <- H_W_2p_cross(k_all, optimized_params$H_inf[1], k_star, q_k_star, optimized_params$Param_shape[1])
+all_predictions$PowerLaw_2p <- H_L_2p_cross(k_all, optimized_params$H_inf[2], k_star, q_k_star, optimized_params$Param_shape[2])
+all_predictions$Weibull_1p <- H_W_1p_cross(k_all, k_star, q_k_star, optimized_params$Param_shape[3])
+all_predictions$PowerLaw_1p <- H_L_1p_cross(k_all, k_star, q_k_star, optimized_params$Param_shape[4])
+
+
+```
+
+
+```{r}
+# =====================================================================
+# 5. IDENTIFY THE BEST MODEL (Lowest Validation MSE)
+# =====================================================================
+
+# Isolate the row with the lowest Validation MSE
+best_model_info <- optimized_params %>%
+  slice_min(order_by = Validation_MSE, n = 1)
+
+best_model_name <- best_model_info$Model
+best_model_mse <- best_model_info$Validation_MSE
+
+cat("\n======================================================\n")
+cat("BEST MODEL SELECTION (Validation Data: 1h to 23h)\n")
+cat("======================================================\n")
+cat("Winning Model:    ", best_model_name, "\n")
+cat("Validation MSE:   ", best_model_mse, "\n")
+
+# Automatically extract the 15-minute (k = 0.25) prediction for the winning model
+best_15min_prediction <- all_predictions[[best_model_name]][all_predictions$k_hours == 0.25]
+
+cat("Extrapolated 15m: ", best_15min_prediction, "\n")
+cat("======================================================\n")
+```
+
+
+
+
+
+
+
+
+
+
 ```{r}
 library(ggplot2)
+library(dplyr)
+library(tidyr)
 
-# 1. Recreate the numeric hours column for a proper continuous x-axis
-correlation_results$Hours <- as.numeric(gsub("[^0-9]", "", correlation_results$Scale))
+# =====================================================================
+# 1. PREPARE EMPIRICAL DATA (Points)
+# =====================================================================
+# Filter out anything below k=1 since the plot starts at 1
+df_points <- fit_data %>%
+  filter(k_hours >= 1) %>%
+  rename(k = k_hours, rho = cross_corr) %>%
+  mutate(Data_Type = ifelse(k >= 24, "Calib. data", "Valid. data")) %>%
+  # Convert to factor to force the legend order exactly as shown in the image
+  mutate(Data_Type = factor(Data_Type, levels = c("Calib. data", "Valid. data")))
 
-# 2. Generate the plot
-corr_plot <- ggplot(correlation_results, aes(x = Hours, y = Correlation_Lag_0)) +
-  geom_point(aes(size = Valid_Bin_Pairs), color = "darkred", alpha = 0.7) +
-  theme_minimal() +
-# scale_x_log10() + 
-  labs(
-    title = "Zero-Lag Cross-Correlation vs. Aggregation Scale",
-    subtitle = paste("Between", stat1, "and", stat2),
-    x = "Aggregation Scale (Hours)",
-    y = "Pearson Correlation (Lag 0)",
-    size = "Valid Bin Pairs\n(Sample Size)"
+# =====================================================================
+# 2. GENERATE SMOOTH PREDICTION LINES (Curves)
+# =====================================================================
+k_star <- 24
+q_k_star <- df_points$rho[df_points$k == k_star][1]
+
+# Create a dense sequence of k values for perfectly smooth curves on a log scale
+k_smooth <- exp(seq(log(1), log(250), length.out = 300))
+
+# Helper function to extract parameters safely from optimized_params
+get_param <- function(mod_name, param_col) {
+  val <- optimized_params[[param_col]][optimized_params$Model == mod_name]
+  return(val[1])
+}
+
+# Calculate predicted values using the exact functions we defined earlier
+df_lines <- data.frame(k = k_smooth)
+df_lines$`Wei-2p` <- H_W_2p_cross(k_smooth, get_param("Weibull_2p", "H_inf"), k_star, q_k_star, get_param("Weibull_2p", "Param_shape"))
+df_lines$`Wei-1p` <- H_W_1p_cross(k_smooth, k_star, q_k_star, get_param("Weibull_1p", "Param_shape"))
+df_lines$`Lom-2p` <- H_L_2p_cross(k_smooth, get_param("PowerLaw_2p", "H_inf"), k_star, q_k_star, get_param("PowerLaw_2p", "Param_shape"))
+df_lines$`Lom-1p` <- H_L_1p_cross(k_smooth, k_star, q_k_star, get_param("PowerLaw_1p", "Param_shape"))
+
+# Reshape lines to long format and set factor levels for legend ordering
+df_lines_long <- df_lines %>%
+  pivot_longer(cols = -k, names_to = "Model", values_to = "Prediction") %>%
+  mutate(Model = factor(Model, levels = c("Lom-1p", "Lom-2p", "Wei-1p", "Wei-2p")))
+
+# =====================================================================
+# 3. BUILD THE EXACT PLOT
+# =====================================================================
+ggplot() +
+  # 1. Vertical dashed guidelines at k=1 and k=24
+  geom_vline(xintercept = c(1, 24), linetype = "dashed", color = "gray70", linewidth = 0.8) +
+  
+  # 2. Add Model Lines (mapped to color and linetype)
+  geom_line(data = df_lines_long, aes(x = k, y = Prediction, color = Model, linetype = Model), linewidth = 1) +
+  
+  # 3. Add Empirical Points (mapped to fill to keep legend separate from lines)
+  geom_point(data = df_points, aes(x = k, y = rho, fill = Data_Type), 
+             shape = 21, color = "transparent", size = 2.5) +
+  
+  # 4. X-Axis: Logarithmic scale with exact breaks from the image
+  scale_x_continuous(
+    trans = "log", 
+    breaks = c(1, 2, 4, 12, 24, 48, 96, 216),
+    labels = c(1, 2, 4, 12, 24, 48, 96, 216),
+    expand = c(0.05, 0.05)
   ) +
+  
+  # 5. Y-Axis: Linear scale, limits 0 to 1, with identical secondary axis
+  scale_y_continuous(
+    limits = c(0, 1), 
+    breaks = seq(0, 1, by = 0.2),
+    sec.axis = dup_axis(name = expression(rho^"(i,j)"))
+  ) +
+  
+  # 6. Exact Color and Linetype Mappings
+  scale_color_manual(
+    name = NULL,
+    values = c("Lom-1p" = "red", "Lom-2p" = "red", "Wei-1p" = "blue", "Wei-2p" = "blue")
+  ) +
+  scale_linetype_manual(
+    name = NULL,
+    values = c("Lom-1p" = "solid", "Lom-2p" = "dashed", "Wei-1p" = "solid", "Wei-2p" = "dashed")
+  ) +
+  scale_fill_manual(
+    name = NULL,
+    values = c("Calib. data" = "black", "Valid. data" = "orange")
+  ) +
+  
+  # 7. Labels
+  labs(
+    x = "Temporal scale, k [h]", 
+    y = expression(rho^"(i,j)"), 
+    title = "St. ID: Station 1 vs Station 2"
+  ) +
+  
+  # 8. Theme customization to match the provided image
+  theme_bw() +
   theme(
-    plot.title = element_text(face = "bold"),
-    legend.position = "right"
+    # Gridlines (dashed light gray)
+    panel.grid.major = element_line(linetype = "dashed", color = "gray85"),
+    panel.grid.minor = element_blank(),
+    
+    # Title centering
+    plot.title = element_text(hjust = 0.5, size = 11),
+    
+    # Legend Box styling (Bottom Right, inside plot)
+    legend.position = c(0.9,0.25 ),
+    legend.background = element_rect(color = "black", fill = "white", linewidth = 0.5),
+    legend.key = element_blank(),
+    legend.spacing.y = unit(0.3, "cm"), # Tightly pack the legend items
+    legend.margin = margin(t = 2, r = 5, b = 2, l = 5)
+  ) +
+  
+  # 9. Format the Legend Keys (combine them neatly)
+  guides(
+    fill = guide_legend(order = 1, override.aes = list(shape = 21, size = 3, color = c("black", "orange"))),
+    color = guide_legend(order = 2, override.aes = list(linewidth = 1)),
+    linetype = guide_legend(order = 2)
   )
-
-# 3. Display the plot
-print(corr_plot)
 ```
 
 
