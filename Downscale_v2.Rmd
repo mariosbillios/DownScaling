@@ -457,13 +457,13 @@ library(ggplot2)
 library(dplyr)
 library(patchwork)
 
-global_expected_models <- unique(optimized_parameters_df$Model)
+global_expected_models <- unique(optimized_parameters$Model)
 global_expected_data   <- c("Calib. data", "Valid. data")
 
 plot_statistic_dynamic <- function(stat_name, y_label = stat_name, show_legend = FALSE) {
   
   # 1. Prepare Empirical Data points
-  emp_data <- final_summary_df %>%
+  emp_data <- final_summary %>%
     select(k_hours, value = !!sym(stat_name)) %>%
     filter(!is.na(value)) %>%
     mutate(Data_Type = ifelse(k_hours >= 24, "Calib. data", "Valid. data"))
@@ -477,7 +477,7 @@ plot_statistic_dynamic <- function(stat_name, y_label = stat_name, show_legend =
   }
   
   k_smooth <- exp(seq(log(1), log(max_k), length.out = 500))
-  params <- optimized_parameters_df %>% filter(Statistic == stat_name)
+  params <- optimized_parameters %>% filter(Statistic == stat_name)
   
   smooth_lines_list <- list()
   for (i in 1:nrow(params)) {

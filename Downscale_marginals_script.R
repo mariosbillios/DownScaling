@@ -22,14 +22,14 @@ H_L_2p <- function(k, H0, k_star, q_k_star, b) {
 
 
 H_W_1p_pdry <- function(k, k_star, q_k_star, a) {
- H0 <- 1 
+ H0 <- 0.99
  power_exponent <- (k / k_star)^a
  base_fraction <- q_k_star / H0
  H0 * (base_fraction ^ power_exponent)
 }
 
 H_L_1p_pdry <- function(k, k_star, q_k_star, b) {
- H0 <- 1 
+ H0 <- 0.99
  ln_numerator <- log(1 + b * k)
  ln_denominator <- log(1 + b * k_star)
  power_exponent <- ln_numerator / ln_denominator
@@ -63,7 +63,7 @@ station_files <- list.files(path = data_dir, pattern = "\\.txt$", full.names = T
 
 # =====================================================================
 # =====================================================================
-station_files<-station_files[1:3]
+station_files<-station_files[1:4]
 
 for (current_station_file in station_files) {
  
@@ -81,54 +81,59 @@ for (current_station_file in station_files) {
  end_ts <- ymd_h(end_date_str)
  df$date <- seq(start_ts, end_ts, by = "hour")
  
-
+ 
+ 
  Base_time_chunks_per_hour <- 4
  df$precip_rate <- df$precip 
  df$hour_index <- 0:(nrow(df) - 1)
  
- all_k <- c(empirical_k_validation, empirical_k_training)
+ 
+ 
+ all_k<-c(1:12,24,24*2,24*3,24*4,24*5,24*9,24*10)
+ 
  
  inspection_list <- list()
-
-for (i in seq_along(all_k)) {
+ 
+ for (i in seq_along(all_k)) {
   
   agg_length <- all_k[i]
   
   # 1. Define the NA tolerance based on the scale
   if (agg_length <= 12) {
-    max_na_allowed <- 0
+   max_na_allowed <- 0
   } else {
-    # Linear interpolation: starts at 1 NA for 24h, ends at 3 NAs for 240h
-    # Formula: y = y1 + (x - x1) * ((y2 - y1) / (x2 - x1))
-    max_na_allowed <- round(1 + (agg_length - 24) * ((3 - 1) / (240 - 24)))
+   # Linear interpolation: starts at 1 NA for 24h, ends at 3 NAs for 240h
+   # Formula: y = y1 + (x - x1) * ((y2 - y1) / (x2 - x1))
+   max_na_allowed <- round(1 + (agg_length - 24) * ((3 - 1) / (240 - 24)))
   }
   
   # 2. Apply the aggregation with the new logic
   df_detailed <- df %>%
-    mutate(bin_id = hour_index %/% agg_length) %>%
-    group_by(bin_id) %>%
-    mutate(
-      hours_in_bin = n(),
-      # Count exactly how many NAs are in this specific bin
-      na_count = sum(is.na(precip_rate)), 
-      
-      # Calculate mean conditionally
-      bin_mean_precip = ifelse(
-        na_count <= max_na_allowed, 
-        mean(precip_rate, na.rm = TRUE), # If within tolerance, ignore NAs to get the mean
-        NA_real_                         # If tolerance exceeded, the bin is invalid (NA)
-      ),
-      
-      is_valid_bin = (!is.na(bin_mean_precip) & hours_in_bin == agg_length)
-    ) %>%
-    ungroup() %>%
-    # Clean up the temporary na_count column so it doesn't clutter your dataframe
-    select(-na_count) 
+   mutate(bin_id = hour_index %/% agg_length) %>%
+   group_by(bin_id) %>%
+   mutate(
+    hours_in_bin = n(),
+    # Count exactly how many NAs are in this specific bin
+    na_count = sum(is.na(precip_rate)), 
+    
+    # Calculate mean conditionally
+    bin_mean_precip = ifelse(
+     na_count <= max_na_allowed, 
+     mean(precip_rate, na.rm = TRUE), # If within tolerance, ignore NAs to get the mean
+     NA_real_                         # If tolerance exceeded, the bin is invalid (NA)
+    ),
+    
+    is_valid_bin = (!is.na(bin_mean_precip) & hours_in_bin == agg_length)
+   ) %>%
+   ungroup() %>%
+   # Clean up the temporary na_count column so it doesn't clutter your dataframe
+   select(-na_count) 
   
   # Save the dataframe to our list
   list_name <- paste0("scale_", agg_length, "Hours")
   inspection_list[[list_name]] <- df_detailed
-}
+ }
+ 
  
  clean_bins_list <- list()
  for (scale_name in names(inspection_list)) {
@@ -352,16 +357,6 @@ for (i in seq_along(all_k)) {
  
 } 
 
-
-subset_data <- all_predictions[all_predictions$Statistic == "p_zero" & 
-                                all_predictions$Scale_k >= 1 & 
-                                all_predictions$Scale_k <= 23, ]
-
-
-mse_weibull_2p <- mean((subset_data$Actual - subset_data$Weibull_2p)^2, na.rm = TRUE)
-
-
-mse_weibull_1p <- mean((subset_data$Actual - subset_data$Weibull_1p)^2, na.rm = TRUE)
 
 
 
