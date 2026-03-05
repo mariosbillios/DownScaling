@@ -4,6 +4,170 @@ library(lubridate)
 library(lmomco)
 library(DEoptim)
 library(tools)
+library(patchwork)
+library(ggplot2)
+library(tidyr)
+
+
+
+# Define expected models and data globally
+global_expected_models <- c("Weibull_1p", "PowerLaw_1p", "Weibull_2p", "PowerLaw_2p", "Weibull_3p", "PowerLaw_3p")
+global_expected_data   <- c("Calib. data", "Valid. data")
+
+# Define the plotting function
+plot_statistic_dynamic <- function(stat_name, y_label = stat_name, show_legend = FALSE, fixed_y = TRUE) {
+  
+  # Prepare Empirical Data points (Using the _df variables from your loop)
+  emp_data <- final_summary_df %>%
+    select(k_hours, value = !!sym(stat_name)) %>%
+    filter(!is.na(value)) %>%
+    mutate(Data_Type = ifelse(k_hours >= 24, "Calib. data", "Valid. data"))
+  
+  max_k <- max(emp_data$k_hours, na.rm = TRUE)
+  q_k_star_val <- emp_data$value[emp_data$k_hours == 24]
+  
+  if(length(q_k_star_val) == 0) {
+    warning(paste("No 24h anchor found for", stat_name, "- skipping plot."))
+    return(NULL) 
+  }
+  
+  k_smooth <- exp(seq(log(1), log(max_k), length.out = 500))
+  params <- optimized_parameters_df %>% filter(Statistic == stat_name)
+  
+  smooth_lines_list <- list()
+  for (i in 1:nrow(params)) {
+    m_name <- params$Model[i]
+    H0_val <- params$H0[i]
+    a_val  <- params$Param_a[i]
+    b_val  <- params$Param_b[i]
+    
+    pred_smooth <- switch(m_name,
+                          "Weibull_3p"  = H_W_3p(k_smooth, H0_val, a_val, b_val),
+                          "PowerLaw_3p" = H_L_3p(k_smooth, H0_val, a_val, b_val),
+                          "Weibull_2p"  = H_W_2p(k_smooth, H0_val, 24, q_k_star_val, a_val),
+                          "PowerLaw_2p" = H_L_2p(k_smooth, H0_val, 24, q_k_star_val, b_val),
+                          "Weibull_1p"  = H_W_1p_pdry(k_smooth, 24, q_k_star_val, a_val),
+                          "PowerLaw_1p" = H_L_1p_pdry(k_smooth, 24, q_k_star_val, b_val),
+                          rep(NA, length(k_smooth))
+    )
+    smooth_lines_list[[i]] <- data.frame(Scale_k = k_smooth, Model = m_name, value = pred_smooth)
+  }
+  
+  smooth_data <- bind_rows(smooth_lines_list) %>% filter(!is.na(value))
+  
+  line_colors <- c("Weibull_1p" = "blue", "PowerLaw_1p" = "red",
+                   "Weibull_2p" = "blue", "PowerLaw_2p" = "red",
+                   "Weibull_3p" = "darkblue", "PowerLaw_3p" = "darkred")
+  
+  line_types <- c("Weibull_1p" = "solid", "PowerLaw_1p" = "solid",
+                  "Weibull_2p" = "dashed", "PowerLaw_2p" = "dashed",
+                  "Weibull_3p" = "dotted", "PowerLaw_3p" = "dotted")
+  
+  custom_breaks <- c(1, 6, 12, 24, 120, 240)
+  custom_breaks <- custom_breaks[custom_breaks <= max_k] 
+  
+  fill_guide  <- if(show_legend) guide_legend(order = 1, ncol = 1) else "none"
+  line_guide  <- if(show_legend) guide_legend(order = 2, nrow = 2) else "none"
+  
+  p <- ggplot() +
+    geom_line(data = smooth_data, aes(x = Scale_k, y = value, color = Model, linetype = Model), linewidth = 1) +
+    geom_point(data = emp_data, aes(x = k_hours, y = value, fill = Data_Type), 
+               shape = 21, color = "white", size = 3, stroke = 0.5) +
+    geom_vline(xintercept = 24, linetype = "dashed", color = "darkgray", linewidth = 0.8) +
+    scale_x_log10(breaks = custom_breaks, labels = custom_breaks) +
+    scale_fill_manual(name = "", values = c("Calib. data" = "black", "Valid. data" = "orange"),
+                      limits = global_expected_data, drop = FALSE, guide = fill_guide) +
+    scale_color_manual(name = "", values = line_colors, limits = global_expected_models, 
+                       drop = FALSE, guide = line_guide) +
+    scale_linetype_manual(name = "", values = line_types, limits = global_expected_models, 
+                          drop = FALSE, guide = line_guide) +
+    labs(x = "Temporal scale, k [h]", y = y_label) +
+    theme_bw() +
+    theme(
+      panel.grid.major = element_line(linetype = "dashed", color = "lightgray"),
+      panel.grid.minor = element_blank(),
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+      axis.text.y = element_text(angle = 90, vjust = 0.5, hjust = 0.5),
+      legend.key = element_blank(),
+      legend.background = element_blank()
+    )
+  
+  if (fixed_y) {
+    p <- p + scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.2))
+  }
+  
+  return(p)
+}
+
+plot_qq_dynamic <- function(stat_name, y_label = stat_name) {
+  
+  # 1. Filter predictions for the specific statistic
+  df_stat <- all_predictions_df %>% 
+    filter(Statistic == stat_name) %>%
+    filter(!is.na(Actual)) %>% # Remove extrapolated k=0.25 if it has no empirical data
+    mutate(Data_Type = ifelse(Scale_k >= 24, "Calib. data", "Valid. data"))
+  
+  if(nrow(df_stat) == 0) return(NULL)
+  
+  # 2. Pivot data to long format so we can facet by Model
+  # We gather all columns EXCEPT Scale_k, Statistic, Actual, and Data_Type
+  model_cols <- setdiff(names(df_stat), c("Scale_k", "Statistic", "Actual", "Data_Type"))
+  
+  df_long <- df_stat %>%
+    pivot_longer(cols = all_of(model_cols), names_to = "Model", values_to = "Predicted") %>%
+    filter(!is.na(Predicted))
+  
+  if(nrow(df_long) == 0) return(NULL)
+  
+  # 3. Find global min/max so the X and Y axes perfectly match (true 1:1 plot)
+  min_val <- min(c(df_long$Actual, df_long$Predicted), na.rm = TRUE)
+  max_val <- max(c(df_long$Actual, df_long$Predicted), na.rm = TRUE)
+  buffer <- (max_val - min_val) * 0.05
+  if(buffer == 0) buffer <- 0.05
+  
+  # 4. Generate the Plot
+  p <- ggplot(df_long, aes(x = Actual, y = Predicted)) +
+    # The 1:1 perfect agreement line
+    geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "darkgray", linewidth = 0.8) +
+    
+    # The actual data points
+    geom_point(aes(fill = Data_Type), shape = 21, color = "white", size = 2.5, stroke = 0.5) +
+    
+    # Create separate panels for each model (e.g., Weibull_1p, Weibull_2p, etc.)
+    facet_wrap(~ Model) + 
+    
+    # Formatting
+    scale_fill_manual(name = "", values = c("Calib. data" = "black", "Valid. data" = "orange")) +
+    scale_x_continuous(limits = c(min_val - buffer, max_val + buffer)) +
+    scale_y_continuous(limits = c(min_val - buffer, max_val + buffer)) +
+    coord_fixed(ratio = 1) + # Forces the plot to be perfectly square
+    
+    labs(
+      title = bquote("Empirical vs Predicted:" ~ .(y_label[[1]])),
+      x = bquote("Empirical (Actual)" ~ .(y_label[[1]])),
+      y = bquote("Predicted" ~ .(y_label[[1]]))
+    )  +
+    theme_bw() +
+    theme(
+      panel.grid.major = element_line(linetype = "dotted", color = "lightgray"),
+      panel.grid.minor = element_blank(),
+      strip.background = element_rect(fill = "whitesmoke"),
+      strip.text = element_text(face = "bold"),
+      legend.position = "bottom"
+    )
+  
+  return(p)
+}
+
+
+
+
+
+
+
+
+
+
 
 
 H_W_2p <- function(k, H0, k_star, q_k_star, a) {
@@ -63,7 +227,7 @@ station_files <- list.files(path = data_dir, pattern = "\\.txt$", full.names = T
 
 # =====================================================================
 # =====================================================================
-station_files<-station_files[1:4]
+station_files<-station_files[1:20]# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
 for (current_station_file in station_files) {
  
@@ -83,6 +247,48 @@ for (current_station_file in station_files) {
  
  
  
+ # =====================================================================
+ # 1. INITIAL METADATA CHECK (Place this right after defining start_ts / end_ts)
+ # =====================================================================
+ 
+ meta_records_str <- grep("^Number of records:", header_lines, value = TRUE)
+ meta_missing_str <- grep("^Percent missing data:", header_lines, value = TRUE)
+ 
+ metadata_records <- as.numeric(sub("Number of records: ", "", meta_records_str))
+ metadata_missing_pct <- as.numeric(sub("Percent missing data: ", "", meta_missing_str))
+ 
+ # Calculate Theoretical Data (Total hours between start and end)
+ theoretical_records <- as.numeric(difftime(end_ts, start_ts, units = "hours")) + 1
+ 
+ explicit_nas <- sum(is.na(df$precip)) 
+ missing_rows <- max(0, theoretical_records - nrow(df))
+ total_missing_data_points <- explicit_nas + missing_rows
+ calculated_missing_pct <- (total_missing_data_points / theoretical_records) * 100
+ 
+ # Start building the text file content
+ metadata_validation_text <- c(
+   "==================================================",
+   paste("STATION:", station_name),
+   "==================================================",
+   "",
+   "--- HOURLY BASELINE SPAN ---",
+   paste("Start Datetime:", start_date_str, "(", start_ts, ")"),
+   paste("End Datetime:  ", end_date_str, "(", end_ts, ")"),
+   "",
+   "--- HOURLY RECORD COUNTS ---",
+   paste("Theoretical Records (Hours between start/end):", theoretical_records),
+   paste("Metadata 'Number of records':               ", metadata_records),
+   paste("Actual Rows in Data File:                   ", nrow(df)),
+   paste("-> Difference (Theoretical - Metadata):     ", theoretical_records - metadata_records),
+   "",
+   "--- HOURLY MISSING DATA CHECK ---",
+   paste("Explicit Missing Values (-999):             ", explicit_nas),
+   paste("Missing Rows (Theoretical - Actual Rows):   ", missing_rows),
+   paste("Total Missing Data Points:                  ", total_missing_data_points),
+   paste("Calculated Percent Missing Data:            ", round(calculated_missing_pct, 4), "%"),
+   paste("Metadata 'Percent missing data':            ", metadata_missing_pct, "%")
+ )
+ 
  Base_time_chunks_per_hour <- 4
  df$precip_rate <- df$precip 
  df$hour_index <- 0:(nrow(df) - 1)
@@ -100,11 +306,15 @@ for (current_station_file in station_files) {
   
   # 1. Define the NA tolerance based on the scale
   if (agg_length <= 12) {
-   max_na_allowed <- 0
+    max_na_allowed <- 0
   } else {
-   # Linear interpolation: starts at 1 NA for 24h, ends at 3 NAs for 240h
-   # Formula: y = y1 + (x - x1) * ((y2 - y1) / (x2 - x1))
-   max_na_allowed <- round(1 + (agg_length - 24) * ((3 - 1) / (240 - 24)))
+    # Define the absolute maximum NAs allowed at the highest scale (240h)
+    # Set to 23 so you never have a full 24-hour gap in a 10-day bin
+    max_na_at_240h <- 23 
+    
+    # Linear interpolation: starts at 1 NA for 24h, ends at max_na_at_240h for 240h
+    # Formula: y = y1 + (x - x1) * ((y2 - y1) / (x2 - x1))
+    max_na_allowed <- round(1 + (agg_length - 24) * ((max_na_at_240h - 1) / (240 - 24)))
   }
   
   # 2. Apply the aggregation with the new logic
@@ -135,6 +345,8 @@ for (current_station_file in station_files) {
  }
  
  
+ 
+ 
  clean_bins_list <- list()
  for (scale_name in names(inspection_list)) {
   df_detailed <- inspection_list[[scale_name]]
@@ -148,6 +360,43 @@ for (current_station_file in station_files) {
    )
   clean_bins_list[[scale_name]] <- valid_bins
  }
+ 
+ scale_na_summary_lines <- c(
+   "",
+   "--- SCALE-BY-SCALE NA HANDLING (CASCADING DATA LOSS) ---",
+   sprintf("%-10s | %-15s | %-12s | %-15s | %-15s", 
+           "Scale (k)", "Theor. Bins", "Valid Bins", "Bins Dropped", "% Data Lost")
+ )
+ scale_na_summary_lines <- c(scale_na_summary_lines, strrep("-", 75))
+ 
+ for (scale_name in names(clean_bins_list)) {
+   # Extract the numerical scale from the name (e.g., "scale_24Hours" -> 24)
+   agg_length <- as.numeric(gsub("[^0-9.]", "", scale_name))
+   
+   # Calculate how many bins there WOULD be if the gauge never broke down
+   theor_bins <- theoretical_records %/% agg_length
+   
+   # Count how many bins actually survived the NA tolerance check
+   valid_bins_count <- nrow(clean_bins_list[[scale_name]])
+   
+   # Calculate losses
+   dropped_bins <- theor_bins - valid_bins_count
+   dropped_pct <- (dropped_bins / theor_bins) * 100
+   
+   # Format the line with consistent spacing
+   line <- sprintf("%-10s | %-15d | %-12d | %-15d | %-15.2f%%", 
+                   paste0(agg_length, "h"), theor_bins, valid_bins_count, dropped_bins, dropped_pct)
+   
+   scale_na_summary_lines <- c(scale_na_summary_lines, line)
+ }
+ 
+ # Append the scale breakdown to the main text file content
+ metadata_validation_text <- c(metadata_validation_text, scale_na_summary_lines)
+ 
+ 
+ 
+ 
+ 
  
  summary_stats_list <- list()
  for (scale_name in names(clean_bins_list)) {
@@ -341,8 +590,9 @@ for (current_station_file in station_files) {
  
  all_predictions_df <- bind_rows(predicted_list)
  
+ 
  # =====================================================================
- # EXPORT STATION RESULTS
+ # EXPORT STATION RESULTS 
  # =====================================================================
  station_folder <- file.path(individual_dir, station_name)
  dir.create(station_folder, recursive = TRUE, showWarnings = FALSE)
@@ -352,10 +602,80 @@ for (current_station_file in station_files) {
  saveRDS(final_evaluated_models, file.path(station_folder, "final_evaluated_models.rds"))
  saveRDS(best_models, file.path(station_folder, "best_models.rds"))
  saveRDS(all_predictions_df, file.path(station_folder, "all_predictions.rds"))
+ writeLines(metadata_validation_text, file.path(station_folder, paste0(station_name, "_extra_metadata.txt")))
+ # --- NEW: GENERATE AND EXPORT PLOTS ---
  
- cat("Successfully exported results for:", station_name, "\n")
+ # 1. Fixed Y-Axis Plots (0 to 1)
+ plot_p_zero_fixed <- plot_statistic_dynamic("p_zero", y_label = expression(p[0]^{(k)}), show_legend = TRUE, fixed_y = TRUE)
+ plot_t2_fixed     <- plot_statistic_dynamic("t2_pos", y_label = expression(t[2]^{(k)}), fixed_y = TRUE)
+ plot_t3_fixed     <- plot_statistic_dynamic("t3_pos", y_label = expression(t[3]^{(k)}), fixed_y = TRUE)
+ plot_t4_fixed     <- plot_statistic_dynamic("t4_pos", y_label = expression(t[4]^{(k)}), fixed_y = TRUE)
  
-} 
+ 
+ 
+ # Check if plots generated successfully before combining
+ if (!is.null(plot_p_zero_fixed)) {
+   combined_plot_fixed <- (plot_p_zero_fixed | plot_t2_fixed) / (plot_t3_fixed | plot_t4_fixed) + 
+     plot_layout(guides = "collect") & 
+     theme(legend.position = "bottom", legend.box = "horizontal", legend.box.just = "left", legend.spacing.x = unit(0.5, "cm"))
+   
+   # Export Fixed Plot
+   ggsave(file.path(station_folder, "scaling_plots_fixed.png"), combined_plot_fixed, width = 10, height = 8, bg = "white")
+ }
+ 
+ # 2. Dynamic Y-Axis Plots (Unconstrained)
+ plot_p_zero_dyn <- plot_statistic_dynamic("p_zero", y_label = expression(p[0]^{(k)}), show_legend = TRUE, fixed_y = FALSE)
+ plot_t2_dyn     <- plot_statistic_dynamic("t2_pos", y_label = expression(t[2]^{(k)}), fixed_y = FALSE)
+ plot_t3_dyn     <- plot_statistic_dynamic("t3_pos", y_label = expression(t[3]^{(k)}), fixed_y = FALSE)
+ plot_t4_dyn     <- plot_statistic_dynamic("t4_pos", y_label = expression(t[4]^{(k)}), fixed_y = FALSE)
+ 
+ if (!is.null(plot_p_zero_dyn)) {
+   combined_plot_dynamic <- (plot_p_zero_dyn | plot_t2_dyn) / (plot_t3_dyn | plot_t4_dyn) + 
+     plot_layout(guides = "collect") & 
+     theme(legend.position = "bottom", legend.box = "horizontal", legend.box.just = "left", legend.spacing.x = unit(0.5, "cm"))
+   
+   # Export Dynamic Plot
+   ggsave(file.path(station_folder, "scaling_plots_dynamic.png"), combined_plot_dynamic, width = 10, height = 8, bg = "white")
+ }
+ 
+ 
+ 
+ # =====================================================================
+ # 4. GENERATE EMPIRICAL VS PREDICTED (Q-Q) SCATTER PLOTS
+ # =====================================================================
+ 
+ qq_p_zero <- plot_qq_dynamic("p_zero", y_label = expression(p[0]^{(k)}))
+ qq_t2     <- plot_qq_dynamic("t2_pos", y_label = expression(t[2]^{(k)}))
+ qq_t3     <- plot_qq_dynamic("t3_pos", y_label = expression(t[3]^{(k)}))
+ qq_t4     <- plot_qq_dynamic("t4_pos", y_label = expression(t[4]^{(k)}))
+ 
+ # Combine them into one big grid using patchwork
+ # We use wrap_plots to handle any NULLs safely if a stat failed to compute
+ qq_list <- list(qq_p_zero, qq_t2, qq_t3, qq_t4)
+ qq_list <- qq_list[!sapply(qq_list, is.null)] # Remove empty plots
+ 
+ if(length(qq_list) > 0) {
+   combined_qq_plots <- wrap_plots(qq_list, ncol = 2) + 
+     plot_layout(guides = "collect") & 
+     theme(legend.position = "bottom")
+   
+   # Save the huge validation grid
+   ggsave(file.path(station_folder, "qq_validation_plots.png"), 
+          combined_qq_plots, width = 12, height = 10, bg = "white")
+ }
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ cat("Successfully exported results and plots for:", station_name, "\n")
+ 
+} # End of the main station loop
 
 
 

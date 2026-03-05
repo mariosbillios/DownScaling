@@ -18,7 +18,6 @@ generalData_path <- file.path(gdrive_path,"General_Data")
 
 ```{r}
 
-# --- 1 & 2. READ DATA AND DATES ---
 file_path <- file.path(generalData_path, "/GSDR/QC_d data - Germany/DE_00003.txt")
 df <- read.table(file_path, skip =21, col.names = "precip")
 
@@ -53,13 +52,17 @@ for (i in seq_along(all_k)) {
   
   agg_length <- all_k[i]
   
-  # 1. Define the NA tolerance based on the scale
+ # 1. Define the NA tolerance based on the scale
   if (agg_length <= 12) {
     max_na_allowed <- 0
   } else {
-    # Linear interpolation: starts at 1 NA for 24h, ends at 3 NAs for 240h
+    # Define the absolute maximum NAs allowed at the highest scale (240h)
+    # Set to 23 so you never have a full 24-hour gap in a 10-day bin
+    max_na_at_240h <- 23 
+    
+    # Linear interpolation: starts at 1 NA for 24h, ends at max_na_at_240h for 240h
     # Formula: y = y1 + (x - x1) * ((y2 - y1) / (x2 - x1))
-    max_na_allowed <- round(1 + (agg_length - 24) * ((3 - 1) / (240 - 24)))
+    max_na_allowed <- round(1 + (agg_length - 24) * ((max_na_at_240h - 1) / (240 - 24)))
   }
   
   # 2. Apply the aggregation with the new logic
