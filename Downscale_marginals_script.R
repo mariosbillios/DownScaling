@@ -227,13 +227,16 @@ station_files <- list.files(path = data_dir, pattern = "\\.txt$", full.names = T
 
 # =====================================================================
 # =====================================================================
-
+station_files<-station_files[64:65]
 
 for (current_station_file in station_files) {
  
-  
- # Extract current station name for export later
+ 
+ # Extract current station name for export and logging
  station_name <- tools::file_path_sans_ext(basename(current_station_file))
+ 
+ # Wrap the entire processing logic in tryCatch
+ tryCatch({
 
  df <- read.table(current_station_file, skip = 21, col.names = "precip")
  df$precip[df$precip == -999] <- NA
@@ -708,14 +711,21 @@ for (current_station_file in station_files) {
  
  
  
- 
- 
- 
  cat("Successfully exported results and plots for:", station_name, "\n")
  
+ }, error = function(e) {
+  
+  # This block ONLY executes if an error occurs in the code above
+  # It prints a warning to the console and gracefully continues to the next file
+  message("--------------------------------------------------")
+  message("FAILED: Station ", station_name, " encountered an error.")
+  message("Error detail: ", conditionMessage(e))
+  message("Skipping to the next station...")
+  message("--------------------------------------------------")
+  
+ }) 
+ 
 } # End of the main station loop
-
-
 
 
 
