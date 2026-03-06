@@ -227,10 +227,11 @@ station_files <- list.files(path = data_dir, pattern = "\\.txt$", full.names = T
 
 # =====================================================================
 # =====================================================================
-station_files<-station_files[1:20]# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+station_files<-station_files[1:5]# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
 for (current_station_file in station_files) {
  
+  
  # Extract current station name for export later
  station_name <- tools::file_path_sans_ext(basename(current_station_file))
 
@@ -265,29 +266,8 @@ for (current_station_file in station_files) {
  total_missing_data_points <- explicit_nas + missing_rows
  calculated_missing_pct <- (total_missing_data_points / theoretical_records) * 100
  
- # Start building the text file content
- metadata_validation_text <- c(
-   "==================================================",
-   paste("STATION:", station_name),
-   "==================================================",
-   "",
-   "--- HOURLY BASELINE SPAN ---",
-   paste("Start Datetime:", start_date_str, "(", start_ts, ")"),
-   paste("End Datetime:  ", end_date_str, "(", end_ts, ")"),
-   "",
-   "--- HOURLY RECORD COUNTS ---",
-   paste("Theoretical Records (Hours between start/end):", theoretical_records),
-   paste("Metadata 'Number of records':               ", metadata_records),
-   paste("Actual Rows in Data File:                   ", nrow(df)),
-   paste("-> Difference (Theoretical - Metadata):     ", theoretical_records - metadata_records),
-   "",
-   "--- HOURLY MISSING DATA CHECK ---",
-   paste("Explicit Missing Values (-999):             ", explicit_nas),
-   paste("Missing Rows (Theoretical - Actual Rows):   ", missing_rows),
-   paste("Total Missing Data Points:                  ", total_missing_data_points),
-   paste("Calculated Percent Missing Data:            ", round(calculated_missing_pct, 4), "%"),
-   paste("Metadata 'Percent missing data':            ", metadata_missing_pct, "%")
- )
+ 
+ 
  
  Base_time_chunks_per_hour <- 4
  df$precip_rate <- df$precip 
@@ -297,54 +277,55 @@ for (current_station_file in station_files) {
  
  all_k<-c(1:12,24,24*2,24*3,24*4,24*5,24*9,24*10)
  
- 
  inspection_list <- list()
+ na_thresholds_list <- list() # To store thresholds for the .rds metadata
  
  for (i in seq_along(all_k)) {
-  
-  agg_length <- all_k[i]
-  
-  # 1. Define the NA tolerance based on the scale
-  if (agg_length <= 12) {
-    max_na_allowed <- 0
-  } else {
-    # Define the absolute maximum NAs allowed at the highest scale (240h)
-    # Set to 23 so you never have a full 24-hour gap in a 10-day bin
-    max_na_at_240h <- 23 
-    
-    # Linear interpolation: starts at 1 NA for 24h, ends at max_na_at_240h for 240h
-    # Formula: y = y1 + (x - x1) * ((y2 - y1) / (x2 - x1))
-    max_na_allowed <- round(1 + (agg_length - 24) * ((max_na_at_240h - 1) / (240 - 24)))
-  }
-  
-  # 2. Apply the aggregation with the new logic
-  df_detailed <- df %>%
-   mutate(bin_id = hour_index %/% agg_length) %>%
-   group_by(bin_id) %>%
-   mutate(
-    hours_in_bin = n(),
-    # Count exactly how many NAs are in this specific bin
-    na_count = sum(is.na(precip_rate)), 
-    
-    # Calculate mean conditionally
-    bin_mean_precip = ifelse(
-     na_count <= max_na_allowed, 
-     mean(precip_rate, na.rm = TRUE), # If within tolerance, ignore NAs to get the mean
-     NA_real_                         # If tolerance exceeded, the bin is invalid (NA)
-    ),
-    
-    is_valid_bin = (!is.na(bin_mean_precip) & hours_in_bin == agg_length)
-   ) %>%
-   ungroup() %>%
-   # Clean up the temporary na_count column so it doesn't clutter your dataframe
-   select(-na_count) 
-  
-  # Save the dataframe to our list
-  list_name <- paste0("scale_", agg_length, "Hours")
-  inspection_list[[list_name]] <- df_detailed
+   
+   agg_length <- all_k[i] 
+   scale_name <- paste0("scale_", agg_length, "Hours")
+   
+   # 1. Apply the conditional threshold rule
+   if (agg_length < 6) {
+     max_na_allowed <- 0  # Strict zero-tolerance strictly under 6h
+     
+   } else if (agg_length >= 6 & agg_length <= 12) {
+     max_na_allowed <- 1  # Rule for 6h to 12h (easy to change to 1 later if needed)
+     
+   } else {
+     # Fast rule for larger scales: max 1/3 of the values missing, rounded up
+     max_na_allowed <- ceiling(agg_length / 5)
+     
+     # Safety check: never allow a completely empty bin to pass
+     max_na_allowed <- min(max_na_allowed, agg_length - 1) 
+   }
+   
+   # 2. Store the calculated threshold for your metadata export
+   na_thresholds_list[[scale_name]] <- max_na_allowed
+   
+   # 3. Apply the aggregation
+   df_detailed <- df %>%
+     mutate(bin_id = hour_index %/% agg_length) %>%
+     group_by(bin_id) %>%
+     mutate(
+       hours_in_bin = n(),
+       na_count = sum(is.na(precip_rate)), 
+       
+       # Calculate mean conditionally
+       bin_mean_precip = ifelse(
+         na_count <= max_na_allowed, 
+         mean(precip_rate, na.rm = TRUE),
+         NA_real_                        
+       ),
+       
+       is_valid_bin = (!is.na(bin_mean_precip) & hours_in_bin == agg_length)
+     ) %>%
+     ungroup() %>%
+     select(-na_count) 
+   
+   # Save the dataframe to our list
+   inspection_list[[scale_name]] <- df_detailed
  }
- 
- 
  
  
  clean_bins_list <- list()
@@ -361,13 +342,11 @@ for (current_station_file in station_files) {
   clean_bins_list[[scale_name]] <- valid_bins
  }
  
- scale_na_summary_lines <- c(
-   "",
-   "--- SCALE-BY-SCALE NA HANDLING (CASCADING DATA LOSS) ---",
-   sprintf("%-10s | %-15s | %-12s | %-15s | %-15s", 
-           "Scale (k)", "Theor. Bins", "Valid Bins", "Bins Dropped", "% Data Lost")
- )
- scale_na_summary_lines <- c(scale_na_summary_lines, strrep("-", 75))
+ 
+ 
+ 
+ # Initialize an empty list to store the scale data frames
+ scale_na_summary_list <- list()
  
  for (scale_name in names(clean_bins_list)) {
    # Extract the numerical scale from the name (e.g., "scale_24Hours" -> 24)
@@ -383,15 +362,73 @@ for (current_station_file in station_files) {
    dropped_bins <- theor_bins - valid_bins_count
    dropped_pct <- (dropped_bins / theor_bins) * 100
    
-   # Format the line with consistent spacing
-   line <- sprintf("%-10s | %-15d | %-12d | %-15d | %-15.2f%%", 
-                   paste0(agg_length, "h"), theor_bins, valid_bins_count, dropped_bins, dropped_pct)
-   
-   scale_na_summary_lines <- c(scale_na_summary_lines, line)
+   # Store the results as a data frame row rather than text
+   scale_na_summary_list[[scale_name]] <- data.frame(
+     Scale_k_hours = agg_length,
+     Theoretical_Bins = theor_bins,
+     Valid_Bins = valid_bins_count,
+     Dropped_Bins = dropped_bins,
+     Dropped_Pct = dropped_pct
+   )
  }
  
- # Append the scale breakdown to the main text file content
- metadata_validation_text <- c(metadata_validation_text, scale_na_summary_lines)
+ 
+ 
+ scale_na_summary_list <- list()
+ 
+ for (scale_name in names(clean_bins_list)) {
+   agg_length <- as.numeric(gsub("[^0-9.]", "", scale_name))
+   theor_bins <- theoretical_records %/% agg_length
+   valid_bins_count <- nrow(clean_bins_list[[scale_name]])
+   dropped_bins <- theor_bins - valid_bins_count
+   dropped_pct <- (dropped_bins / theor_bins) * 100
+   
+   # Retrieve the threshold we stored earlier
+   current_max_na <- na_thresholds_list[[scale_name]]
+   
+   # Store results, now including the dynamic threshold
+   scale_na_summary_list[[scale_name]] <- data.frame(
+     Scale_k_hours = agg_length,
+     Max_NA_Allowed = current_max_na,    # NEW COLUMN ADDED HERE
+     Theoretical_Bins = theor_bins,
+     Valid_Bins = valid_bins_count,
+     Dropped_Bins = dropped_bins,
+     Dropped_Pct = dropped_pct
+   )
+ }
+ 
+ # Combine all scales into your final data frame
+ scale_na_summary_df <- bind_rows(scale_na_summary_list)
+ 
+ 
+ 
+ 
+ 
+ 
+ # Create a comprehensive metadata list object
+ station_metadata_obj <- list(
+   General_Info = list(
+     Station = station_name,
+     Start_Datetime = start_ts,
+     End_Datetime = end_ts,
+     Theoretical_Records = theoretical_records,
+     Metadata_Records = metadata_records,
+     Actual_Rows = nrow(df)
+   ),
+   Missing_Data_Summary = list(
+     Explicit_NAs = explicit_nas,
+     Missing_Rows = missing_rows,
+     Total_Missing_Points = total_missing_data_points,
+     Calculated_Missing_Pct = calculated_missing_pct,
+     Metadata_Missing_Pct = metadata_missing_pct
+   ),
+   Scale_Data_Loss = scale_na_summary_df
+ )
+ 
+ 
+ 
+ 
+ 
  
  
  
@@ -602,8 +639,9 @@ for (current_station_file in station_files) {
  saveRDS(final_evaluated_models, file.path(station_folder, "final_evaluated_models.rds"))
  saveRDS(best_models, file.path(station_folder, "best_models.rds"))
  saveRDS(all_predictions_df, file.path(station_folder, "all_predictions.rds"))
- writeLines(metadata_validation_text, file.path(station_folder, paste0(station_name, "_extra_metadata.txt")))
- # --- NEW: GENERATE AND EXPORT PLOTS ---
+ saveRDS(station_metadata_obj, file.path(station_folder,"extra_metadata.rds"))
+ 
+ 
  
  # 1. Fixed Y-Axis Plots (0 to 1)
  plot_p_zero_fixed <- plot_statistic_dynamic("p_zero", y_label = expression(p[0]^{(k)}), show_legend = TRUE, fixed_y = TRUE)

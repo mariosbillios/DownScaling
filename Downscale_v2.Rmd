@@ -44,13 +44,12 @@ df$hour_index <- 0:(nrow(df) - 1)
 
 all_k<-c(1:12,24,24*2,24*3,24*4,24*5,24*9,24*10)
 
-
-
 inspection_list <- list()
 
 for (i in seq_along(all_k)) {
   
   agg_length <- all_k[i]
+  
   
  # 1. Define the NA tolerance based on the scale
   if (agg_length <= 12) {
@@ -64,6 +63,7 @@ for (i in seq_along(all_k)) {
     # Formula: y = y1 + (x - x1) * ((y2 - y1) / (x2 - x1))
     max_na_allowed <- round(1 + (agg_length - 24) * ((max_na_at_240h - 1) / (240 - 24)))
   }
+  
   
   # 2. Apply the aggregation with the new logic
   df_detailed <- df %>%
