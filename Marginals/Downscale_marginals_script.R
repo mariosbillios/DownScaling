@@ -11,7 +11,7 @@ library(tidyr)
 
 
 # Define expected models and data globally
-global_expected_models <- c("Weibull_1p", "PowerLaw_1p", "Weibull_2p", "PowerLaw_2p", "Weibull_3p", "PowerLaw_3p")
+global_expected_models <- c("Weibull_1p", "PowerLaw_1p", "Weibull_2p", "PowerLaw_2p")
 global_expected_data   <- c("Calib. data", "Valid. data")
 
 # Define the plotting function
@@ -42,8 +42,6 @@ plot_statistic_dynamic <- function(stat_name, y_label = stat_name, show_legend =
     b_val  <- params$Param_b[i]
     
     pred_smooth <- switch(m_name,
-                          "Weibull_3p"  = H_W_3p(k_smooth, H0_val, a_val, b_val),
-                          "PowerLaw_3p" = H_L_3p(k_smooth, H0_val, a_val, b_val),
                           "Weibull_2p"  = H_W_2p(k_smooth, H0_val, 24, q_k_star_val, a_val),
                           "PowerLaw_2p" = H_L_2p(k_smooth, H0_val, 24, q_k_star_val, b_val),
                           "Weibull_1p"  = H_W_1p_pdry(k_smooth, 24, q_k_star_val, a_val),
@@ -56,12 +54,10 @@ plot_statistic_dynamic <- function(stat_name, y_label = stat_name, show_legend =
   smooth_data <- bind_rows(smooth_lines_list) %>% filter(!is.na(value))
   
   line_colors <- c("Weibull_1p" = "blue", "PowerLaw_1p" = "red",
-                   "Weibull_2p" = "blue", "PowerLaw_2p" = "red",
-                   "Weibull_3p" = "darkblue", "PowerLaw_3p" = "darkred")
+                   "Weibull_2p" = "blue", "PowerLaw_2p" = "red")
   
   line_types <- c("Weibull_1p" = "solid", "PowerLaw_1p" = "solid",
-                  "Weibull_2p" = "dashed", "PowerLaw_2p" = "dashed",
-                  "Weibull_3p" = "dotted", "PowerLaw_3p" = "dotted")
+                  "Weibull_2p" = "dashed", "PowerLaw_2p" = "dashed")
   
   custom_breaks <- c(1, 6, 12, 24, 120, 240)
   custom_breaks <- custom_breaks[custom_breaks <= max_k] 
@@ -227,7 +223,7 @@ station_files <- list.files(path = data_dir, pattern = "\\.txt$", full.names = T
 
 # =====================================================================
 # =====================================================================
-station_files<-station_files[64:1027]
+station_files<-station_files[1]
 
 for (current_station_file in station_files) {
  
@@ -346,34 +342,6 @@ for (current_station_file in station_files) {
  }
  
  
- 
- 
- # Initialize an empty list to store the scale data frames
- scale_na_summary_list <- list()
- 
- for (scale_name in names(clean_bins_list)) {
-   # Extract the numerical scale from the name (e.g., "scale_24Hours" -> 24)
-   agg_length <- as.numeric(gsub("[^0-9.]", "", scale_name))
-   
-   # Calculate how many bins there WOULD be if the gauge never broke down
-   theor_bins <- theoretical_records %/% agg_length
-   
-   # Count how many bins actually survived the NA tolerance check
-   valid_bins_count <- nrow(clean_bins_list[[scale_name]])
-   
-   # Calculate losses
-   dropped_bins <- theor_bins - valid_bins_count
-   dropped_pct <- (dropped_bins / theor_bins) * 100
-   
-   # Store the results as a data frame row rather than text
-   scale_na_summary_list[[scale_name]] <- data.frame(
-     Scale_k_hours = agg_length,
-     Theoretical_Bins = theor_bins,
-     Valid_Bins = valid_bins_count,
-     Dropped_Bins = dropped_bins,
-     Dropped_Pct = dropped_pct
-   )
- }
  
  
  
