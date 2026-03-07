@@ -214,11 +214,16 @@ calculate_mse <- function(actual, predicted) {
 
 gdrive_path <- paste(LETTERS[file.exists(paste0(LETTERS, ":/My Drive"))], ":/My Drive", sep = "")
 project_path <- file.path(gdrive_path, "Academic_git/DownScaling")
-generalData_path <- file.path(gdrive_path, "General_Data")
-individual_dir <- file.path(project_path, "Station_Outputs") # Export directory
 
 
-data_dir <- file.path(generalData_path, "GSDR/QC_d data - Germany")
+data_dir_name <- "QC_d data - Germany" 
+data_dir <- file.path(gdrive_path, "General_Data/GSDR", data_dir_name)
+
+
+individual_dir <- file.path(project_path, "Marginals",data_dir_name,"Station_Results") # Export directory
+
+
+
 station_files <- list.files(path = data_dir, pattern = "\\.txt$", full.names = TRUE)
 
 # =====================================================================
