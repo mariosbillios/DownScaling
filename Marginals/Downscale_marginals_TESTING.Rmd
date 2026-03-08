@@ -569,7 +569,7 @@ print(combined_plot)
 
 ```{r}
 df_long <- df %>%
-  select(k_hours, l1_pos, l2_pos, l3_pos,t2_pos,t3_pos,t4_pos)
+  select(k_hours, l1_pos, l2_pos, l3_pos,t2_pos,t3_pos,t4_pos,p_zero)
 
 
 
@@ -599,8 +599,7 @@ ggplot(df_long, aes(x = k_hours, y = value, color = variable)) +
   geom_line(size = 1) +
   geom_point() +
   theme_minimal() +
-  labs(x = "Hours", y = "Value", color = "Statistic")+
- scale_x_log10() 
+  labs(x = "Hours", y = "Value", color = "Statistic")
 
 
 ```
