@@ -568,14 +568,19 @@ print(combined_plot)
 
 
 ```{r}
-# 1. Filter for the specific statistic and remove NA validation MSEs
-  df_stat <- eval_models %>% 
-    filter(Statistic == "p_zero") %>%
-    filter(!is.na(mse_validation))
+df_long <- df %>%
+  select(k_hours, l1_pos, l2_pos, l3_pos,t4_pos)
 
-expected_models <- c("Weibull_1p", "Weibull_2p", "PowerLaw_1p", "PowerLaw_2p")
-  df_stat$Model <- factor(df_stat$Model, levels = expected_models)
+df_long<-df_long%>%mutate(l4_pos=t4_pos*l2_pos)
 
+df_long<-df_long%>%pivot_longer(-k_hours, names_to = "variable", values_to = "value")
+
+
+ggplot(df_long, aes(x = k_hours, y = value, color = variable)) +
+  geom_line(size = 1) +
+  geom_point() +
+  theme_minimal() +
+  labs(x = "Hours", y = "Value", color = "Statistic")
 
 ```
 
