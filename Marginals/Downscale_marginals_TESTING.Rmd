@@ -568,7 +568,15 @@ print(combined_plot)
 
 
 ```{r}
-saveRDS(all_predictions_df,"test.rds")
+# 1. Filter for the specific statistic and remove NA validation MSEs
+  df_stat <- eval_models %>% 
+    filter(Statistic == "p_zero") %>%
+    filter(!is.na(mse_validation))
+
+expected_models <- c("Weibull_1p", "Weibull_2p", "PowerLaw_1p", "PowerLaw_2p")
+  df_stat$Model <- factor(df_stat$Model, levels = expected_models)
+
+
 ```
 
 

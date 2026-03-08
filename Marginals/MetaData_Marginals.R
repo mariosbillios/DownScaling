@@ -51,6 +51,7 @@ cat("Starting master metadata extraction for", length(station_files), "files...\
 
 for (current_file in station_files) {
  
+ 
  station_name <- tools::file_path_sans_ext(basename(current_file))
  
  # --- A. READ TXT HEADER ---
@@ -131,8 +132,8 @@ global_metadata_df <- bind_rows(metadata_list)
 global_metadata_df <- global_metadata_df %>%
  mutate(
   # 1. Calculate the Years
-  Start_Year     = year(Start_Datetime),
-  End_Year       = year(End_Datetime),
+  Start_Year     = Start_Datetime,
+  End_Year       = End_Datetime,
   Duration_Years = round(time_length(interval(Start_Datetime, End_Datetime), "years"), 2),
   
   # 2. Round calculated missing to 1 decimal
@@ -146,6 +147,8 @@ global_metadata_df <- global_metadata_df %>%
    TRUE ~ FALSE
   )
  )
+
+
 
 # =====================================================================
 # 6. EXPORT TO RDS AND XLSX
@@ -264,7 +267,7 @@ master_regional_data <- list(
 # 6. EXPORT MASTER RDS
 # =====================================================================
 # Name it exactly as the data_dir_name (e.g., "QC_d data - Germany.rds")
-export_master_path <- file.path(metadata_dir, paste0(data_dir_name, ".rds"))
+export_master_path <- file.path(metadata_dir, paste0(data_dir_name, "_Master_List_Filtered" ,".rds"))
 
 saveRDS(master_regional_data, export_master_path)
 

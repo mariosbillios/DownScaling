@@ -1,0 +1,633 @@
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(patchwork)
+
+# =====================================================================
+# 1. DEFINE PATHS & DIRECTORIES
+# =====================================================================
+gdrive_path   <- "G:/My Drive"
+project_path  <- file.path(gdrive_path, "Academic_git/DownScaling")
+data_dir_name <- "QC_d data - Germany" 
+
+# Input and Output Directories
+metadata_dir <- file.path(project_path, "Marginals", data_dir_name, "Metadata")
+plots_dir    <- file.path(project_path, "Marginals", data_dir_name, "Plots")
+
+# Create the Plots directory if it doesn't exist
+dir.create(plots_dir, recursive = TRUE, showWarnings = FALSE)
+
+# =====================================================================
+# 2. LOAD REGIONAL MASTER DATA
+# =====================================================================
+master_rds_path <- file.path(metadata_dir, paste0(data_dir_name, "_Master_List_Filtered.rds"))
+
+cat("Loading Master Regional Data...\n")
+master_regional_data <- readRDS(master_rds_path)
+all_preds <- master_regional_data$All_Predictions
+
+# =====================================================================
+# 3. DEFINE REGIONAL Q-Q PLOTTING FUNCTION (Calib = Black, Valid by Scale)
+# =====================================================================
+plot_regional_qq <- function(df, stat_name, y_label) {
+  
+  # 1. Filter predictions for the specific statistic
+  df_stat <- df %>% 
+    filter(Statistic == stat_name) %>%
+    filter(!is.na(Actual)) %>% 
+    mutate(
+      Data_Type = ifelse(Scale_k >= 24, "Calibration data", "Validation data"),
+      # Convert Scale_k to a factor and sort it so the legend is in numeric order
+      Scale_k_factor = factor(Scale_k, levels = sort(unique(Scale_k)))
+    )
+  
+  if(nrow(df_stat) == 0) return(NULL)
+  
+  # 2. Pivot data to long format so we can facet by Model
+  model_cols <- setdiff(names(df_stat), c("Scale_k", "Scale_k_factor", "Statistic", "Actual", "Data_Type", "Station_ID"))
+  
+  df_long <- df_stat %>%
+    pivot_longer(cols = all_of(model_cols), names_to = "Model", values_to = "Predicted") %>%
+    filter(!is.na(Predicted))
+  
+  if(nrow(df_long) == 0) return(NULL)
+  
+  # 3. Find global min/max so the X and Y axes perfectly match (true 1:1 plot)
+  min_val <- min(c(df_long$Actual, df_long$Predicted), na.rm = TRUE)
+  max_val <- max(c(df_long$Actual, df_long$Predicted), na.rm = TRUE)
+  buffer <- (max_val - min_val) * 0.05
+  if(buffer == 0) buffer <- 0.05
+  
+  # 4. Generate the Plot
+  p <- ggplot(df_long, aes(x = Actual, y = Predicted, shape = Data_Type)) +
+    # The 1:1 perfect agreement line
+    geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "darkgray", linewidth = 0.8) +
+    
+    # Layer 1: Calibration Points (Strictly Black)
+    geom_point(data = subset(df_long, Data_Type == "Calibration data"), 
+               color = "black", alpha = 0.4, size = 1.5) +
+    
+    # Layer 2: Validation Points (Colored by Scale k)
+    geom_point(data = subset(df_long, Data_Type == "Validation data"), 
+               aes(color = Scale_k_factor), alpha = 0.4, size = 1.5) +
+    
+    # Create separate panels for each model 
+    facet_wrap(~ Model) + 
+    
+    # Formatting
+    scale_color_viridis_d(name = "Valid. Scale (k)", option = "turbo") + 
+    scale_shape_manual(name = "Data Type", values = c("Calibration data" = 16, "Validation data" = 17)) +
+    
+    scale_x_continuous(limits = c(min_val - buffer, max_val + buffer)) +
+    scale_y_continuous(limits = c(min_val - buffer, max_val + buffer)) +
+    coord_fixed(ratio = 1) + 
+    
+    labs(
+      title = bquote("Regional Empirical vs Predicted:" ~ .(y_label[[1]])),
+      x = bquote("Empirical (Actual)" ~ .(y_label[[1]])),
+      y = bquote("Predicted" ~ .(y_label[[1]]))
+    )  +
+    theme_bw() +
+    theme(
+      panel.grid.major = element_line(linetype = "dotted", color = "lightgray"),
+      panel.grid.minor = element_blank(),
+      strip.background = element_rect(fill = "whitesmoke"),
+      strip.text = element_text(face = "bold"),
+      legend.position = "right", 
+      plot.title = element_text(face = "bold", hjust = 0.5)
+    ) +
+    # Ensure point colors override alpha transparency in the legend
+    guides(
+      color = guide_legend(override.aes = list(alpha = 1, size = 3), order = 1),
+      # Set legend colors to black for Calib and gray for Valid so the shapes represent the map accurately
+      shape = guide_legend(override.aes = list(color = c("black", "gray50"), alpha = 1, size = 3), order = 2)
+    )
+  
+  return(p)
+}
+# =====================================================================
+# 4. GENERATE AND EXPORT THE PLOTS
+# =====================================================================
+cat("Generating Q-Q plots...\n")
+
+qq_p_zero <- plot_regional_qq(all_preds, "p_zero", expression(p[0]^{(k)}))
+qq_t2     <- plot_regional_qq(all_preds, "t2_pos", expression(t[2]^{(k)}))
+qq_t3     <- plot_regional_qq(all_preds, "t3_pos", expression(t[3]^{(k)}))
+qq_t4     <- plot_regional_qq(all_preds, "t4_pos", expression(t[4]^{(k)}))
+
+# Combine them into a grid using patchwork
+qq_list <- list(qq_p_zero, qq_t2, qq_t3, qq_t4)
+qq_list <- qq_list[!sapply(qq_list, is.null)] # Remove empty plots safely
+
+if(length(qq_list) > 0) {
+  combined_qq_plots <- wrap_plots(qq_list, ncol = 2) + 
+    plot_layout(guides = "collect") & 
+    theme(legend.position = "bottom")
+  
+  # Save the large validation grid
+  output_file <- file.path(plots_dir, "Regional_QQ_Validation_Plots.png")
+  ggsave(output_file, combined_qq_plots, width = 14, height = 12, bg = "white", dpi = 300)
+  
+  cat("Success! Combined plots saved to:\n", output_file, "\n")
+} else {
+  cat("Warning: No plots were generated. Check your All_Predictions data.\n")
+}
+```
+
+
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(patchwork)
+library(scales) # Needed to extract the turbo palette colors
+
+# =====================================================================
+# 1. DEFINE PATHS & DIRECTORIES (Assuming master data is already loaded)
+# =====================================================================
+gdrive_path   <- "G:/My Drive"
+project_path  <- file.path(gdrive_path, "Academic_git/DownScaling")
+data_dir_name <- "QC_d data - Germany" 
+plots_dir     <- file.path(project_path, "Marginals", data_dir_name, "Plots")
+
+# (If you need to reload the data, uncomment the lines below)
+# metadata_dir <- file.path(project_path, "Marginals", data_dir_name, "Metadata")
+# master_rds_path <- file.path(metadata_dir, paste0(data_dir_name, "_Master_List_Filtered.rds"))
+# master_regional_data <- readRDS(master_rds_path)
+# all_preds <- master_regional_data$All_Predictions
+
+# =====================================================================
+# 2. DEFINE MSE BARPLOT FUNCTION
+# =====================================================================
+plot_regional_mse_bars <- function(df, stat_name, y_label) {
+  
+  # 1. Filter for the specific statistic
+  df_stat <- df %>% 
+    filter(Statistic == stat_name) %>%
+    filter(!is.na(Actual))
+  
+  if(nrow(df_stat) == 0) return(NULL)
+  
+  # 2. Pivot to long format to access all Models
+  model_cols <- setdiff(names(df_stat), c("Scale_k", "Statistic", "Actual", "Station_ID", "Data_Type"))
+  
+  # 3. Calculate Regional MSE per Scale and Model
+  df_mse <- df_stat %>%
+    pivot_longer(cols = all_of(model_cols), names_to = "Model", values_to = "Predicted") %>%
+    filter(!is.na(Predicted)) %>%
+    group_by(Scale_k, Model) %>%
+    summarize(MSE = mean((Actual - Predicted)^2, na.rm = TRUE), .groups = "drop") %>%
+    mutate(
+      Data_Type = ifelse(Scale_k >= 24, "Calib. data", "Valid. data"),
+      Scale_k_factor = factor(Scale_k, levels = sort(unique(Scale_k)))
+    )
+  
+  if(nrow(df_mse) == 0) return(NULL)
+  
+  # 4. Create Custom Color Palette
+  # Validation (< 24) gets vibrant colors; Calibration (>= 24) gets grey
+  unique_scales <- sort(unique(df_mse$Scale_k))
+  valid_scales <- unique_scales[unique_scales < 24]
+  calib_scales <- unique_scales[unique_scales >= 24]
+  
+  # Extract hex codes from the "turbo" palette for validation scales
+  valid_colors <- scales::viridis_pal(option = "turbo")(length(valid_scales))
+  calib_colors <- rep("grey60", length(calib_scales)) # uniform grey for training
+  
+  # Map scales to colors
+  custom_colors <- setNames(c(valid_colors, calib_colors), 
+                            c(as.character(valid_scales), as.character(calib_scales)))
+  
+  # 5. Generate the Plot
+  p <- ggplot(df_mse, aes(x = Model, y = MSE, fill = Scale_k_factor)) +
+    # Group bars by Model, dodge by Scale_k
+    geom_bar(stat = "identity", position = position_dodge(width = 0.85), width = 0.8, color = "black", linewidth = 0.2) +
+    
+    # Apply custom fill colors
+    scale_fill_manual(name = "Scale k (hours)", values = custom_colors) +
+    
+    labs(
+      title = bquote("Regional MSE by Model:" ~ .(y_label[[1]])),
+      x = "Theoretical Model",
+      y = "Mean Squared Error (MSE)"
+    ) +
+    theme_bw() +
+    theme(
+      panel.grid.major.y = element_line(linetype = "dashed", color = "lightgray"),
+      panel.grid.minor = element_blank(),
+      panel.grid.major.x = element_blank(), # Remove vertical grid lines for cleaner bars
+      strip.background = element_rect(fill = "whitesmoke"),
+      legend.position = "right",
+      plot.title = element_text(face = "bold", hjust = 0.5),
+      axis.text.x = element_text(angle = 15, vjust = 1, hjust = 1) # Slight tilt for model names
+    )
+  
+  return(p)
+}
+
+# =====================================================================
+# 3. GENERATE AND EXPORT PLOTS
+# =====================================================================
+cat("Generating Regional MSE Barplots...\n")
+
+bar_p_zero <- plot_regional_mse_bars(all_preds, "p_zero", expression(p[0]^{(k)}))
+bar_t2     <- plot_regional_mse_bars(all_preds, "t2_pos", expression(t[2]^{(k)}))
+bar_t3     <- plot_regional_mse_bars(all_preds, "t3_pos", expression(t[3]^{(k)}))
+bar_t4     <- plot_regional_mse_bars(all_preds, "t4_pos", expression(t[4]^{(k)}))
+
+# Combine them into a grid using patchwork
+bar_list <- list(bar_p_zero, bar_t2, bar_t3, bar_t4)
+bar_list <- bar_list[!sapply(bar_list, is.null)] # Remove empty plots safely
+
+if(length(bar_list) > 0) {
+  combined_bar_plots <- wrap_plots(bar_list, ncol = 2) + 
+    plot_layout(guides = "collect") & 
+    theme(legend.position = "right") # Collect the legend on the right
+  
+  # Save the large validation grid
+  output_file <- file.path(plots_dir, "Regional_MSE_Barplots.png")
+  ggsave(output_file, combined_bar_plots, width = 14, height = 10, bg = "white", dpi = 300)
+  
+  cat("Success! Combined MSE bar plots saved to:\n", output_file, "\n")
+} else {
+  cat("Warning: No plots were generated. Check your All_Predictions data.\n")
+}
+```
+
+
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(patchwork)
+library(scales) 
+
+# =====================================================================
+# 1. DEFINE PATHS & DIRECTORIES 
+# =====================================================================
+gdrive_path   <- "G:/My Drive"
+project_path  <- file.path(gdrive_path, "Academic_git/DownScaling")
+data_dir_name <- "QC_d data - Germany" 
+plots_dir     <- file.path(project_path, "Marginals", data_dir_name, "Plots")
+
+# =====================================================================
+# 2. DEFINE SQUARED ERROR BOXPLOT FUNCTION
+# =====================================================================
+plot_regional_se_boxplots <- function(df, stat_name, y_label) {
+  
+  # 1. Filter for the specific statistic
+  df_stat <- df %>% 
+    filter(Statistic == stat_name) %>%
+    filter(!is.na(Actual))
+  
+  if(nrow(df_stat) == 0) return(NULL)
+  
+  # 2. Pivot to long format to access all Models
+  model_cols <- setdiff(names(df_stat), c("Scale_k", "Statistic", "Actual", "Station_ID", "Data_Type"))
+  
+  # 3. Calculate Squared Error per Station, Scale, and Model
+  # We do NOT summarize here, so we keep the distribution for the boxplot
+  df_se <- df_stat %>%
+    pivot_longer(cols = all_of(model_cols), names_to = "Model", values_to = "Predicted") %>%
+    filter(!is.na(Predicted)) %>%
+    mutate(
+      Squared_Error = (Actual - Predicted)^2,
+      Data_Type = ifelse(Scale_k >= 24, "Calib. data", "Valid. data"),
+      Scale_k_factor = factor(Scale_k, levels = sort(unique(Scale_k)))
+    )
+  
+  if(nrow(df_se) == 0) return(NULL)
+  
+  # 4. Create Custom Color Palette
+  # Validation (< 24) gets vibrant colors; Calibration (>= 24) gets grey
+  unique_scales <- sort(unique(df_se$Scale_k))
+  valid_scales <- unique_scales[unique_scales < 24]
+  calib_scales <- unique_scales[unique_scales >= 24]
+  
+  valid_colors <- scales::viridis_pal(option = "turbo")(length(valid_scales))
+  calib_colors <- rep("grey60", length(calib_scales)) 
+  
+  # Map scales to colors
+  custom_colors <- setNames(c(valid_colors, calib_colors), 
+                            c(as.character(valid_scales), as.character(calib_scales)))
+  
+  # 5. Generate the Plot
+  p <- ggplot(df_se, aes(x = Model, y = Squared_Error, fill = Scale_k_factor)) +
+    # Group boxplots by Model, dodge by Scale_k
+    geom_boxplot(position = position_dodge(width = 0.85), width = 0.7, 
+                 outlier.size = 0.5, outlier.alpha = 0.3, linewidth = 0.3) +
+    
+    # Apply custom fill colors
+    scale_fill_manual(name = "Scale k (hours)", values = custom_colors) +
+    
+    labs(
+      title = bquote("Regional SE Dist.:" ~ .(y_label[[1]])),
+      x = "Theoretical Model",
+      y = "Squared Error (SE)"
+    ) +
+    theme_bw() +
+    theme(
+      panel.grid.major.y = element_line(linetype = "dashed", color = "lightgray"),
+      panel.grid.minor = element_blank(),
+      panel.grid.major.x = element_blank(), 
+      strip.background = element_rect(fill = "whitesmoke"),
+      legend.position = "right",
+      plot.title = element_text(face = "bold", hjust = 0.5),
+      axis.text.x = element_text(angle = 15, vjust = 1, hjust = 1) 
+    )
+  
+  # NOTE: Squared Errors often have massive outliers. 
+  # If your boxes are getting squashed flat, uncomment the next line to use a logarithmic scale:
+  # p <- p + scale_y_log10() + ylab("Squared Error (Log10 Scale)")
+  
+  return(p)
+}
+
+# =====================================================================
+# 3. GENERATE AND EXPORT PLOTS
+# =====================================================================
+cat("Generating Regional SE Boxplots...\n")
+
+box_p_zero <- plot_regional_se_boxplots(all_preds, "p_zero", expression(p[0]^{(k)}))
+box_t2     <- plot_regional_se_boxplots(all_preds, "t2_pos", expression(t[2]^{(k)}))
+box_t3     <- plot_regional_se_boxplots(all_preds, "t3_pos", expression(t[3]^{(k)}))
+box_t4     <- plot_regional_se_boxplots(all_preds, "t4_pos", expression(t[4]^{(k)}))
+
+# Combine them into a grid using patchwork
+box_list <- list(box_p_zero, box_t2, box_t3, box_t4)
+box_list <- box_list[!sapply(box_list, is.null)] 
+
+if(length(box_list) > 0) {
+  combined_box_plots <- wrap_plots(box_list, ncol = 2) + 
+    plot_layout(guides = "collect") & 
+    theme(legend.position = "right") 
+  
+  # Save the large validation grid
+  output_file <- file.path(plots_dir, "Regional_SE_Boxplots.png")
+  ggsave(output_file, combined_box_plots, width = 14, height = 10, bg = "white", dpi = 300)
+  
+  cat("Success! Combined SE boxplots saved to:\n", output_file, "\n")
+} else {
+  cat("Warning: No plots were generated. Check your All_Predictions data.\n")
+}
+```
+
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+
+# =====================================================================
+# 1. DEFINE PATHS & DIRECTORIES 
+# =====================================================================
+gdrive_path   <- "G:/My Drive"
+project_path  <- file.path(gdrive_path, "Academic_git/DownScaling")
+data_dir_name <- "QC_d data - Germany" 
+plots_dir     <- file.path(project_path, "Marginals", data_dir_name, "Plots")
+
+# (If you need to reload the master data, uncomment the lines below)
+# metadata_dir <- file.path(project_path, "Marginals", data_dir_name, "Metadata")
+# master_rds_path <- file.path(metadata_dir, paste0(data_dir_name, "_Master_List_Filtered.rds"))
+# master_regional_data <- readRDS(master_rds_path)
+
+# Extract the evaluated models dataframe (contains mse_validation)
+eval_models <- master_regional_data$Final_Evaluated_Models
+
+# =====================================================================
+# 2. DEFINE ECDF PLOTTING FUNCTION
+# =====================================================================
+plot_ecdf_mse <- function(df, stat_name, title_expr) {
+  
+  # 1. Filter for the specific statistic and remove NA validation MSEs
+  df_stat <- df %>% 
+    filter(Statistic == stat_name) %>%
+    filter(!is.na(mse_validation))
+  
+  if(nrow(df_stat) == 0) return(NULL)
+  
+  # 2. Ensure models are factors so the legend order and mapping are consistent
+  expected_models <- c("Weibull_1p", "Weibull_2p", "PowerLaw_1p", "PowerLaw_2p")
+  df_stat$Model <- factor(df_stat$Model, levels = expected_models)
+  
+  
+  
+  # 4. Generate the Plot
+  p <- ggplot(df_stat, aes(x = mse_validation, color = Model, linetype = Model)) +
+    # Use step function for ECDF
+    stat_ecdf(geom = "step", linewidth = 1) +
+    
+    # Map colors to match the uploaded image (Wei = Blue, Lom/PowerLaw = Red)
+    scale_color_manual(
+      values = c("Weibull_1p" = "blue", "Weibull_2p" = "blue",
+                 "PowerLaw_1p" = "red", "PowerLaw_2p" = "red"),
+      labels = c("Weibull_1p" = "Wei-1p", "Weibull_2p" = "Wei-2p",
+                 "PowerLaw_1p" = "Lom-1p", "PowerLaw_2p" = "Lom-2p")
+    ) +
+    
+    # Map linetypes to match the uploaded image (1p = Solid, 2p = Dashed)
+    scale_linetype_manual(
+      values = c("Weibull_1p" = "solid", "Weibull_2p" = "dashed",
+                 "PowerLaw_1p" = "solid", "PowerLaw_2p" = "dashed"),
+      labels = c("Weibull_1p" = "Wei-1p", "Weibull_2p" = "Wei-2p",
+                 "PowerLaw_1p" = "Lom-1p", "PowerLaw_2p" = "Lom-2p")
+    ) +
+    
+    
+    labs(
+      title = bquote("Statistic:" ~ .(title_expr[[1]])),
+      x = expression(epsilon ~ "(MSE)"),
+      y = expression("Prob(" * epsilon <= x * ")")
+    ) +
+    theme_bw() +
+    theme(
+      panel.grid.major = element_line(linetype = "dashed", color = "lightgray"),
+      panel.grid.minor = element_blank(),
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+      axis.title = element_text(size = 12),
+      
+      # Boxed legend styling similar to the image
+      legend.position = "inside",
+      legend.position.inside = c(0.8, 0.2), # Adjust coordinates if legend overlaps curves
+      legend.title = element_blank(),
+      legend.background = element_rect(color = "black", linewidth = 0.5)
+    )
+  
+  return(p)
+}
+
+# =====================================================================
+# 3. GENERATE AND EXPORT PLOTS
+# =====================================================================
+cat("Generating Regional ECDF Plots...\n")
+
+ecdf_p_zero <- plot_ecdf_mse(eval_models, "p_zero", expression(p[0]))
+ecdf_t2     <- plot_ecdf_mse(eval_models, "t2_pos", expression(tau[2]^"+"))
+ecdf_t3     <- plot_ecdf_mse(eval_models, "t3_pos", expression(tau[3]^"+"))
+ecdf_t4     <- plot_ecdf_mse(eval_models, "t4_pos", expression(tau[4]^"+"))
+
+# Remove the legend from all plots except the first one for a cleaner grid
+if (!is.null(ecdf_t2)) ecdf_t2 <- ecdf_t2 + theme(legend.position = "none")
+if (!is.null(ecdf_t3)) ecdf_t3 <- ecdf_t3 + theme(legend.position = "none")
+if (!is.null(ecdf_t4)) ecdf_t4 <- ecdf_t4 + theme(legend.position = "none")
+
+# Combine them into a grid using patchwork (1 row, 4 columns)
+ecdf_list <- list(ecdf_p_zero, ecdf_t2, ecdf_t3, ecdf_t4)
+ecdf_list <- ecdf_list[!sapply(ecdf_list, is.null)] 
+
+if(length(ecdf_list) > 0) {
+  combined_ecdf_plots <- wrap_plots(ecdf_list, nrow = 1) 
+  
+  # Save the grid
+  output_file <- file.path(plots_dir, "Regional_ECDF_MSE.png")
+  ggsave(output_file, combined_ecdf_plots, width = 16, height = 4.5, bg = "white", dpi = 300)
+  
+  cat("Success! Combined ECDF plots saved to:\n", output_file, "\n")
+} else {
+  cat("Warning: No plots were generated. Check your Final_Evaluated_Models data.\n")
+}
+```
+
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(patchwork)
+
+# =====================================================================
+# 1. DEFINE PATHS & DIRECTORIES 
+# =====================================================================
+gdrive_path   <- "G:/My Drive"
+project_path  <- file.path(gdrive_path, "Academic_git/DownScaling")
+data_dir_name <- "QC_d data - Germany" 
+plots_dir     <- file.path(project_path, "Marginals", data_dir_name, "Plots")
+
+# (If you need to reload the master data, uncomment the lines below)
+# metadata_dir <- file.path(project_path, "Marginals", data_dir_name, "Metadata")
+# master_rds_path <- file.path(metadata_dir, paste0(data_dir_name, "_Master_List_Filtered.rds"))
+# master_regional_data <- readRDS(master_rds_path)
+
+# Extract all predictions to calculate errors per scale dynamically
+all_preds <- master_regional_data$All_Predictions
+
+# =====================================================================
+# 2. DEFINE APE ECDF PLOTTING FUNCTION
+# =====================================================================
+plot_ecdf_ape <- function(df, stat_name, title_expr) {
+  
+  # 1. Filter for specific statistic and VALIDATION scales only (< 24)
+  df_stat <- df %>% 
+    filter(Statistic == stat_name, Scale_k < 24) %>%
+    filter(!is.na(Actual))
+  
+  if(nrow(df_stat) == 0) return(NULL)
+  
+  # 2. Pivot to long format to access all Models
+  model_cols <- intersect(names(df_stat), c("Weibull_1p", "Weibull_2p", "PowerLaw_1p", "PowerLaw_2p"))
+  
+  df_long <- df_stat %>%
+    pivot_longer(cols = all_of(model_cols), names_to = "Model", values_to = "Predicted") %>%
+    filter(!is.na(Predicted)) %>%
+    
+    # 3. Calculate Absolute Percentage Error (APE) based on formula
+    mutate(APE = 100 * abs(Predicted - Actual) / Actual) %>%
+    
+    # Remove Inf/NaNs just in case an Actual value was exactly 0
+    filter(is.finite(APE))
+  
+  if(nrow(df_long) == 0) return(NULL)
+  
+  # 4. Ensure models are factors so the legend order is consistent
+  expected_models <- c("Weibull_1p", "Weibull_2p", "PowerLaw_1p", "PowerLaw_2p")
+  df_long$Model <- factor(df_long$Model, levels = expected_models)
+  
+
+  
+  # 6. Generate the Plot
+  p <- ggplot(df_long, aes(x = APE, color = Model, linetype = Model)) +
+    # Step function for ECDF
+    stat_ecdf(geom = "step", linewidth = 1) +
+    
+    # Vertical reference line at x = 5 (matching your image)
+    geom_vline(xintercept = 5, linetype = "solid", color = "black", linewidth = 0.5) +
+    
+    # Map colors to match the uploaded image (Wei = Blue, Lom/PowerLaw = Red)
+    scale_color_manual(
+      values = c("Weibull_1p" = "blue", "Weibull_2p" = "blue",
+                 "PowerLaw_1p" = "red", "PowerLaw_2p" = "red"),
+      labels = c("Weibull_1p" = "Wei-1p", "Weibull_2p" = "Wei-2p",
+                 "PowerLaw_1p" = "Lom-1p", "PowerLaw_2p" = "Lom-2p")
+    ) +
+    
+    # Map linetypes to match the uploaded image (1p = Solid, 2p = Dashed)
+    scale_linetype_manual(
+      values = c("Weibull_1p" = "solid", "Weibull_2p" = "dashed",
+                 "PowerLaw_1p" = "solid", "PowerLaw_2p" = "dashed"),
+      labels = c("Weibull_1p" = "Wei-1p", "Weibull_2p" = "Wei-2p",
+                 "PowerLaw_1p" = "Lom-1p", "PowerLaw_2p" = "Lom-2p")
+    ) +
+    
+
+    labs(
+      title = bquote("Statistic:" ~ .(title_expr[[1]])),
+      x = expression(epsilon ~ "[%]"),
+      y = expression("Prob(" * epsilon <= x * ")")
+    ) +
+    theme_bw() +
+    theme(
+      panel.grid.major = element_line(linetype = "dashed", color = "lightgray"),
+      panel.grid.minor = element_blank(),
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+      axis.title = element_text(size = 12),
+      
+      # Boxed legend styling
+      legend.position = "inside",
+      legend.position.inside = c(0.75, 0.25), 
+      legend.title = element_blank(),
+      legend.background = element_rect(color = "black", linewidth = 0.5)
+    )
+  
+  return(p)
+}
+
+# =====================================================================
+# 3. GENERATE AND EXPORT PLOTS
+# =====================================================================
+cat("Generating Regional APE ECDF Plots...\n")
+
+ecdf_ape_p_zero <- plot_ecdf_ape(all_preds, "p_zero", expression(p[0]))
+ecdf_ape_t2     <- plot_ecdf_ape(all_preds, "t2_pos", expression(tau[2]^"+"))
+ecdf_ape_t3     <- plot_ecdf_ape(all_preds, "t3_pos", expression(tau[3]^"+"))
+ecdf_ape_t4     <- plot_ecdf_ape(all_preds, "t4_pos", expression(tau[4]^"+"))
+
+# Remove the legend from all plots except the first one for a cleaner grid
+if (!is.null(ecdf_ape_t2)) ecdf_ape_t2 <- ecdf_ape_t2 + theme(legend.position = "none")
+if (!is.null(ecdf_ape_t3)) ecdf_ape_t3 <- ecdf_ape_t3 + theme(legend.position = "none")
+if (!is.null(ecdf_ape_t4)) ecdf_ape_t4 <- ecdf_ape_t4 + theme(legend.position = "none")
+
+# Combine them into a grid using patchwork (1 row, 4 columns)
+ecdf_ape_list <- list(ecdf_ape_p_zero, ecdf_ape_t2, ecdf_ape_t3, ecdf_ape_t4)
+ecdf_ape_list <- ecdf_ape_list[!sapply(ecdf_ape_list, is.null)] 
+
+if(length(ecdf_ape_list) > 0) {
+  combined_ecdf_ape_plots <- wrap_plots(ecdf_ape_list, nrow = 1) 
+  
+  # Save the grid
+  output_file <- file.path(plots_dir, "Regional_ECDF_APE.png")
+  ggsave(output_file, combined_ecdf_ape_plots, width = 16, height = 4.5, bg = "white", dpi = 300)
+  
+  cat("Success! Combined APE ECDF plots saved to:\n", output_file, "\n")
+} else {
+  cat("Warning: No plots were generated. Check your All_Predictions data.\n")
+}
+```
+
