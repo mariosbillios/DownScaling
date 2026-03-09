@@ -11,7 +11,6 @@ library(tidyr)
 # GLOBALS & MODEL DEFINITIONS
 # =====================================================================
 
-# Define expected models and data globally
 global_expected_models <- c("Weibull_1p", "PowerLaw_1p", "Weibull_2p", "PowerLaw_2p", "PowerDecay_3p")
 global_expected_data   <- c("Calib. data", "Valid. data")
 
@@ -45,7 +44,7 @@ H_L_1p_pdry <- function(k, k_star, q_k_star, b) {
  H0 * (base_fraction ^ power_exponent)
 }
 
-# New Model Definition
+# Standard Power Decay for ALL L-Moments
 H_PowerDecay <- function(k, a, b, c) {
  a + b * (k^(-c))
 }
@@ -55,7 +54,6 @@ mse_L_2p <- function(par, k, y, k_star, q_k_star) mean((y - H_L_2p(k, par[1], k_
 mse_W_1p <- function(par, k, y, k_star, q_k_star) mean((y - H_W_1p_pdry(k, k_star, q_k_star, par[1]))^2, na.rm=TRUE)
 mse_L_1p <- function(par, k, y, k_star, q_k_star) mean((y - H_L_1p_pdry(k, k_star, q_k_star, par[1]))^2, na.rm=TRUE)
 
-# New MSE Function
 mse_PowerDecay <- function(par, k, y) {
  mean((y - H_PowerDecay(k, par[1], par[2], par[3]))^2, na.rm=TRUE)
 }
@@ -198,25 +196,21 @@ plot_qq_dynamic <- function(stat_name, y_label = stat_name) {
  return(p)
 }
 
-
 # =====================================================================
 # PATHS AND DIRECTORY SETUP
 # =====================================================================
 
 gdrive_path <- paste(LETTERS[file.exists(paste0(LETTERS, ":/My Drive"))], ":/My Drive", sep = "")
 project_path <- file.path(gdrive_path, "Academic_git/DownScaling")
-
 data_dir_name <- "QC_d data - Germany" 
 data_dir <- file.path(gdrive_path, "General_Data/GSDR", data_dir_name)
-
-individual_dir <- file.path(project_path, "Marginals",data_dir_name,"Testing")
-
+individual_dir <- file.path(project_path, "Marginals", data_dir_name, "Testing")
 station_files <- list.files(path = data_dir, pattern = "\\.txt$", full.names = TRUE)
 
 # =====================================================================
 # MAIN PROCESSING LOOP
 # =====================================================================
-station_files <- station_files[1]
+station_files <- station_files[1] # Adjust as needed
 
 for (current_station_file in station_files) {
  
@@ -235,15 +229,12 @@ for (current_station_file in station_files) {
   end_ts <- ymd_h(end_date_str)
   df$date <- seq(start_ts, end_ts, by = "hour")
   
-  # METADATA CHECK
   meta_records_str <- grep("^Number of records:", header_lines, value = TRUE)
   meta_missing_str <- grep("^Percent missing data:", header_lines, value = TRUE)
-  
   metadata_records <- as.numeric(sub("Number of records: ", "", meta_records_str))
   metadata_missing_pct <- as.numeric(sub("Percent missing data: ", "", meta_missing_str))
   
   theoretical_records <- as.numeric(difftime(end_ts, start_ts, units = "hours")) + 1
-  
   explicit_nas <- sum(is.na(df$precip)) 
   missing_rows <- max(0, theoretical_records - nrow(df))
   total_missing_data_points <- explicit_nas + missing_rows
@@ -254,24 +245,19 @@ for (current_station_file in station_files) {
   df$hour_index <- 0:(nrow(df) - 1)
   
   all_k <- c(1:12,24,24*2,24*3,24*4,24*5,24*9,24*10)
-  
   inspection_list <- list()
   na_thresholds_list <- list() 
   
   for (i in seq_along(all_k)) {
-   
    agg_length <- all_k[i] 
    scale_name <- paste0("scale_", agg_length, "Hours")
    
-   if (agg_length < 6) {
-    max_na_allowed <- 0  
-   } else if (agg_length >= 6 & agg_length <= 12) {
-    max_na_allowed <- 1  
-   } else {
+   if (agg_length < 6) { max_na_allowed <- 0 } 
+   else if (agg_length >= 6 & agg_length <= 12) { max_na_allowed <- 1 } 
+   else {
     max_na_allowed <- ceiling(agg_length / 5)
     max_na_allowed <- min(max_na_allowed, agg_length - 1) 
    }
-   
    na_thresholds_list[[scale_name]] <- max_na_allowed
    
    df_detailed <- df %>%
@@ -286,9 +272,7 @@ for (current_station_file in station_files) {
       NA_real_                        
      ),
      is_valid_bin = (!is.na(bin_mean_precip) & hours_in_bin == agg_length)
-    ) %>%
-    ungroup() %>%
-    select(-na_count) 
+    ) %>% ungroup() %>% select(-na_count) 
    
    inspection_list[[scale_name]] <- df_detailed
   }
@@ -296,14 +280,8 @@ for (current_station_file in station_files) {
   clean_bins_list <- list()
   for (scale_name in names(inspection_list)) {
    df_detailed <- inspection_list[[scale_name]]
-   valid_bins <- df_detailed %>%
-    filter(is_valid_bin) %>%
-    group_by(bin_id) %>%
-    summarise(
-     agg_date = min(date),
-     bin_mean_precip = first(bin_mean_precip),
-     .groups = "drop"
-    )
+   valid_bins <- df_detailed %>% filter(is_valid_bin) %>%
+    group_by(bin_id) %>% summarise(agg_date = min(date), bin_mean_precip = first(bin_mean_precip), .groups = "drop")
    clean_bins_list[[scale_name]] <- valid_bins
   }
   
@@ -316,35 +294,19 @@ for (current_station_file in station_files) {
    dropped_pct <- (dropped_bins / theor_bins) * 100
    
    current_max_na <- na_thresholds_list[[scale_name]]
-   
    scale_na_summary_list[[scale_name]] <- data.frame(
-    Scale_k_hours = agg_length,
-    Max_NA_Allowed = current_max_na,    
-    Theoretical_Bins = theor_bins,
-    Valid_Bins = valid_bins_count,
-    Dropped_Bins = dropped_bins,
-    Dropped_Pct = dropped_pct
+    Scale_k_hours = agg_length, Max_NA_Allowed = current_max_na, Theoretical_Bins = theor_bins,
+    Valid_Bins = valid_bins_count, Dropped_Bins = dropped_bins, Dropped_Pct = dropped_pct
    )
   }
-  
   scale_na_summary_df <- bind_rows(scale_na_summary_list)
   
   station_metadata_obj <- list(
-   General_Info = list(
-    Station = station_name,
-    Start_Datetime = start_ts,
-    End_Datetime = end_ts,
-    Theoretical_Records = theoretical_records,
-    Metadata_Records = metadata_records,
-    Actual_Rows = nrow(df)
-   ),
-   Missing_Data_Summary = list(
-    Explicit_NAs = explicit_nas,
-    Missing_Rows = missing_rows,
-    Total_Missing_Points = total_missing_data_points,
-    Calculated_Missing_Pct = calculated_missing_pct,
-    Metadata_Missing_Pct = metadata_missing_pct
-   ),
+   General_Info = list(Station = station_name, Start_Datetime = start_ts, End_Datetime = end_ts,
+                       Theoretical_Records = theoretical_records, Metadata_Records = metadata_records, Actual_Rows = nrow(df)),
+   Missing_Data_Summary = list(Explicit_NAs = explicit_nas, Missing_Rows = missing_rows,
+                               Total_Missing_Points = total_missing_data_points, Calculated_Missing_Pct = calculated_missing_pct,
+                               Metadata_Missing_Pct = metadata_missing_pct),
    Scale_Data_Loss = scale_na_summary_df
   )
   
@@ -361,67 +323,40 @@ for (current_station_file in station_files) {
    var_pos  <- ifelse(length(x_pos) > 1, var(x_pos, na.rm = TRUE), NA)
    
    if (length(x_all) >= 4) {
-    lm_all <- lmoms(x_all)
-    l1_all <- lm_all$lambdas[1]
-    l2_all <- lm_all$lambdas[2]
-    l3_all <- lm_all$lambdas[3]
-    l4_all <- lm_all$lambdas[4]
-    t2_all <- lm_all$ratios[2]
-    t3_all <- lm_all$ratios[3]
-    t4_all <- lm_all$ratios[4]
-   } else {
-    l1_all <- l2_all <- l3_all <- l4_all <- t1_all <- t2_all <- t3_all <- t4_all <- NA
-   }
+    lm_all <- lmoms(x_all); l1_all <- lm_all$lambdas[1]; l2_all <- lm_all$lambdas[2]; l3_all <- lm_all$lambdas[3]; l4_all <- lm_all$lambdas[4]; t2_all <- lm_all$ratios[2]; t3_all <- lm_all$ratios[3]; t4_all <- lm_all$ratios[4]
+   } else { l1_all <- l2_all <- l3_all <- l4_all <- t1_all <- t2_all <- t3_all <- t4_all <- NA }
    
    if (length(x_pos) >= 4) {
-    lm_pos <- lmoms(x_pos)
-    l1_pos <- lm_pos$lambdas[1]
-    l2_pos <- lm_pos$lambdas[2]
-    l3_pos <- lm_pos$lambdas[3]
-    l4_pos <- lm_pos$lambdas[4]
-    t2_pos <- lm_pos$ratios[2]
-    t3_pos <- lm_pos$ratios[3]
-    t4_pos <- lm_pos$ratios[4]
-   } else {
-    l1_pos <- l2_pos <- l3_pos <- l4_pos <- t1_pos <- t2_pos <- t3_pos <- t4_pos <- NA
-   }
+    lm_pos <- lmoms(x_pos); l1_pos <- lm_pos$lambdas[1]; l2_pos <- lm_pos$lambdas[2]; l3_pos <- lm_pos$lambdas[3]; l4_pos <- lm_pos$lambdas[4]; t2_pos <- lm_pos$ratios[2]; t3_pos <- lm_pos$ratios[3]; t4_pos <- lm_pos$ratios[4]
+   } else { l1_pos <- l2_pos <- l3_pos <- l4_pos <- t1_pos <- t2_pos <- t3_pos <- t4_pos <- NA }
    
    scale_summary <- data.frame(
-    scale = scale_name, p_zero = p_zero,
-    mean_all = mean_all, var_all = var_all,
+    scale = scale_name, p_zero = p_zero, mean_all = mean_all, var_all = var_all,
     l1_all = l1_all, l2_all = l2_all, l3_all = l3_all, l4_all = l4_all, t2_all = t2_all, t3_all = t3_all, t4_all = t4_all,
     mean_pos = mean_pos, var_pos = var_pos,
     l1_pos = l1_pos, l2_pos = l2_pos, l3_pos = l3_pos, l4_pos = l4_pos, t2_pos = t2_pos, t3_pos = t3_pos, t4_pos = t4_pos
    )
    summary_stats_list[[scale_name]] <- scale_summary
   }
-  
   final_summary_df <- bind_rows(summary_stats_list)
   
   # --- Filter Data & Optimize ---
-  final_summary_df <- final_summary_df %>%
-   mutate(k_hours = as.numeric(gsub("[^0-9.]", "", scale)))
-  
-  fit_data <- final_summary_df %>% 
-   filter(k_hours >= 24) %>% 
-   arrange(k_hours)
+  final_summary_df <- final_summary_df %>% mutate(k_hours = as.numeric(gsub("[^0-9.]", "", scale)))
+  fit_data <- final_summary_df %>% filter(k_hours >= 24) %>% arrange(k_hours)
   
   k_obs <- fit_data$k_hours
   k_star <- 24
   
-  # Separate the stats meant for the original models vs the new PowerDecay model
   stats_to_fit_original <- c("p_zero", "t2_pos", "t3_pos", "t4_pos")
-  stats_to_fit_lmoments <- c("l1_pos", "l2_pos", "l3_pos", "l4_pos")
+  
+  # CRITICAL CHANGE: Put l2_pos FIRST in the vector so its exponent is generated and shared
+  stats_to_fit_lmoments <- c("l2_pos", "l1_pos", "l3_pos", "l4_pos")
   stats_to_fit <- c(stats_to_fit_original, stats_to_fit_lmoments)
   
   all_fits_list <- list()
-  de_ctrl <- DEoptim.control(
-   trace = FALSE, 
-   itermax = 1000,   
-   NP = 50,        
-   reltol = 1e-11,    
-   steptol = 500     
-  )
+  de_ctrl <- DEoptim.control(trace = FALSE, itermax = 1000, NP = 50, reltol = 1e-11, steptol = 500)
+  
+  shared_c <- NA # Initialize shared exponent variable
   
   for (stat in stats_to_fit) {
    y_obs <- fit_data[[stat]]
@@ -430,18 +365,15 @@ for (current_station_file in station_files) {
    if (stat %in% stats_to_fit_original) {
     q_k_star <- fit_data[[stat]][fit_data$k_hours == k_star][1]
     if(is.na(q_k_star)) next
-    
     max_H0 <- ifelse(stat == "p_zero", 1, 1)
     
     fit_W_2p <- DEoptim(mse_W_2p, lower = c(1e-6, 1e-6), upper = c(max_H0, 1000), 
                         k = k_obs, y = y_obs, k_star = k_star, q_k_star = q_k_star, control = de_ctrl)
-    
     fit_L_2p <- DEoptim(mse_L_2p, lower = c(1e-6, 1e-6), upper = c(max_H0, 1000), 
                         k = k_obs, y = y_obs, k_star = k_star, q_k_star = q_k_star, control = de_ctrl)
     
     res_row <- data.frame(
-     Statistic = stat,
-     Model = c("Weibull_2p", "PowerLaw_2p"),
+     Statistic = stat, Model = c("Weibull_2p", "PowerLaw_2p"),
      H0 = c(fit_W_2p$optim$bestmem[1], fit_L_2p$optim$bestmem[1]),
      Param_a = c(fit_W_2p$optim$bestmem[2], NA),
      Param_b = c(NA, fit_L_2p$optim$bestmem[2]),
@@ -450,38 +382,63 @@ for (current_station_file in station_files) {
     )
     
     if (stat == "p_zero") {
-     fit_W_1p <- DEoptim(mse_W_1p, lower = 1e-6, upper = 10, 
-                         k = k_obs, y = y_obs, k_star = k_star, q_k_star = q_k_star, control = de_ctrl)
+     fit_W_1p <- DEoptim(mse_W_1p, lower = 1e-6, upper = 10, k = k_obs, y = y_obs, k_star = k_star, q_k_star = q_k_star, control = de_ctrl)
+     fit_L_1p <- DEoptim(mse_L_1p, lower = 1e-6, upper = 10, k = k_obs, y = y_obs, k_star = k_star, q_k_star = q_k_star, control = de_ctrl)
      
-     fit_L_1p <- DEoptim(mse_L_1p, lower = 1e-6, upper = 10, 
-                         k = k_obs, y = y_obs, k_star = k_star, q_k_star = q_k_star, control = de_ctrl)
-     
-     res_1p <- data.frame(
-      Statistic = stat,
-      Model = c("Weibull_1p", "PowerLaw_1p"),
-      H0 = c(1, 1), 
-      Param_a = c(fit_W_1p$optim$bestmem[1], NA),
-      Param_b = c(NA, fit_L_1p$optim$bestmem[1]),
-      Param_c = c(NA, NA),
-      MSE = c(fit_W_1p$optim$bestval, fit_L_1p$optim$bestval)
-     )
+     res_1p <- data.frame(Statistic = stat, Model = c("Weibull_1p", "PowerLaw_1p"), H0 = c(1, 1), 
+                          Param_a = c(fit_W_1p$optim$bestmem[1], NA), Param_b = c(NA, fit_L_1p$optim$bestmem[1]), Param_c = c(NA, NA),
+                          MSE = c(fit_W_1p$optim$bestval, fit_L_1p$optim$bestval))
      res_row <- bind_rows(res_row, res_1p)
     }
     all_fits_list[[stat]] <- res_row
     
-   } else if (stat %in% stats_to_fit_lmoments) {
+   } else if (stat == "l2_pos") {
+    # Fit L2 first, and SAVE the exponent 'c'
     fit_PD <- DEoptim(mse_PowerDecay, lower = c(-1000, -1000, 1e-6), upper = c(1000, 1000, 10), 
                       k = k_obs, y = y_obs, control = de_ctrl)
     
+    # Capture the scaling exponent for L1, L3, L4 to use
+    shared_c <- fit_PD$optim$bestmem[3]
+    
     res_row <- data.frame(
-     Statistic = stat,
-     Model = "PowerDecay_3p",
-     H0 = NA,
+     Statistic = stat, Model = "PowerDecay_3p", H0 = NA,
      Param_a = fit_PD$optim$bestmem[1],
      Param_b = fit_PD$optim$bestmem[2],
-     Param_c = fit_PD$optim$bestmem[3],
+     Param_c = shared_c, 
      MSE = fit_PD$optim$bestval
     )
+    all_fits_list[[stat]] <- res_row
+    
+   } else if (stat %in% c("l1_pos", "l3_pos", "l4_pos")) {
+    
+    # If L2 failed to generate a c for some reason, fallback to independent optimization
+    if (is.na(shared_c)) {
+     fit_PD <- DEoptim(mse_PowerDecay, lower = c(-1000, -1000, 1e-6), upper = c(1000, 1000, 10), 
+                       k = k_obs, y = y_obs, control = de_ctrl)
+     res_row <- data.frame(
+      Statistic = stat, Model = "PowerDecay_3p", H0 = NA,
+      Param_a = fit_PD$optim$bestmem[1],
+      Param_b = fit_PD$optim$bestmem[2],
+      Param_c = fit_PD$optim$bestmem[3],
+      MSE = fit_PD$optim$bestval
+     )
+    } else {
+     # Use the SHARED exponent from L2. Optimizing only 'a' and 'b'.
+     mse_PowerDecay_shared <- function(par, k, y) {
+      mean((y - H_PowerDecay(k, par[1], par[2], shared_c))^2, na.rm=TRUE)
+     }
+     
+     fit_PD_shared <- DEoptim(mse_PowerDecay_shared, lower = c(-1000, -1000), upper = c(1000, 1000), 
+                              k = k_obs, y = y_obs, control = de_ctrl)
+     
+     res_row <- data.frame(
+      Statistic = stat, Model = "PowerDecay_3p", H0 = NA,
+      Param_a = fit_PD_shared$optim$bestmem[1],
+      Param_b = fit_PD_shared$optim$bestmem[2],
+      Param_c = shared_c, # Hardcoded to perfectly match L2
+      MSE = fit_PD_shared$optim$bestval
+     )
+    }
     all_fits_list[[stat]] <- res_row
    }
   }
@@ -505,8 +462,6 @@ for (current_station_file in station_files) {
    c_val <- if("Param_c" %in% names(current_fit)) current_fit$Param_c else NA
    
    actual_vals <- validation_data[[stat]]
-   
-   # Protect against accessing q_k_star_val for L-moments where it might not be strictly needed by the model
    q_k_star_val <- if(stat %in% names(empirical_24h)) empirical_24h[[stat]] else NA
    
    if (all(is.na(actual_vals))) {
@@ -530,9 +485,7 @@ for (current_station_file in station_files) {
   final_evaluated_models <- bind_rows(validation_results_list)
   
   best_models <- final_evaluated_models %>%
-   group_by(Statistic) %>%
-   slice_min(order_by = mse_validation, n = 1) %>%
-   ungroup()
+   group_by(Statistic) %>% slice_min(order_by = mse_validation, n = 1) %>% ungroup()
   
   # --- Generate All Predictions ---
   k_empirical <- sort(unique(final_summary_df$k_hours))
@@ -564,7 +517,6 @@ for (current_station_file in station_files) {
    }
    predicted_list[[stat]] <- df_stat
   }
-  
   all_predictions_df <- bind_rows(predicted_list)
   
   # =====================================================================
@@ -580,7 +532,7 @@ for (current_station_file in station_files) {
   saveRDS(all_predictions_df, file.path(station_folder, "all_predictions.rds"))
   saveRDS(station_metadata_obj, file.path(station_folder,"extra_metadata.rds"))
   
-  # 1. Fixed Y-Axis Plots (0 to 1) for original stats
+  # 1. Fixed Y-Axis Plots
   plot_p_zero_fixed <- plot_statistic_dynamic("p_zero", y_label = expression(p[0]^{(k)}), show_legend = TRUE, fixed_y = TRUE)
   plot_t2_fixed     <- plot_statistic_dynamic("t2_pos", y_label = expression(t[2]^{(k)}), fixed_y = TRUE)
   plot_t3_fixed     <- plot_statistic_dynamic("t3_pos", y_label = expression(t[3]^{(k)}), fixed_y = TRUE)
@@ -588,13 +540,11 @@ for (current_station_file in station_files) {
   
   if (!is.null(plot_p_zero_fixed)) {
    combined_plot_fixed <- (plot_p_zero_fixed | plot_t2_fixed) / (plot_t3_fixed | plot_t4_fixed) + 
-    plot_layout(guides = "collect") & 
-    theme(legend.position = "bottom", legend.box = "horizontal", legend.box.just = "left", legend.spacing.x = unit(0.5, "cm"))
-   
+    plot_layout(guides = "collect") & theme(legend.position = "bottom", legend.box = "horizontal", legend.box.just = "left", legend.spacing.x = unit(0.5, "cm"))
    ggsave(file.path(station_folder, "scaling_plots_fixed.png"), combined_plot_fixed, width = 10, height = 8, bg = "white")
   }
   
-  # 2. Dynamic Y-Axis Plots for original stats
+  # 2. Dynamic Y-Axis Plots
   plot_p_zero_dyn <- plot_statistic_dynamic("p_zero", y_label = expression(p[0]^{(k)}), show_legend = TRUE, fixed_y = FALSE)
   plot_t2_dyn     <- plot_statistic_dynamic("t2_pos", y_label = expression(t[2]^{(k)}), fixed_y = FALSE)
   plot_t3_dyn     <- plot_statistic_dynamic("t3_pos", y_label = expression(t[3]^{(k)}), fixed_y = FALSE)
@@ -602,9 +552,7 @@ for (current_station_file in station_files) {
   
   if (!is.null(plot_p_zero_dyn)) {
    combined_plot_dynamic <- (plot_p_zero_dyn | plot_t2_dyn) / (plot_t3_dyn | plot_t4_dyn) + 
-    plot_layout(guides = "collect") & 
-    theme(legend.position = "bottom", legend.box = "horizontal", legend.box.just = "left", legend.spacing.x = unit(0.5, "cm"))
-   
+    plot_layout(guides = "collect") & theme(legend.position = "bottom", legend.box = "horizontal", legend.box.just = "left", legend.spacing.x = unit(0.5, "cm"))
    ggsave(file.path(station_folder, "scaling_plots_dynamic.png"), combined_plot_dynamic, width = 10, height = 8, bg = "white")
   }
   
@@ -616,13 +564,11 @@ for (current_station_file in station_files) {
   
   if (!is.null(plot_l1_dyn)) {
    combined_lmoments_plot <- (plot_l1_dyn | plot_l2_dyn) / (plot_l3_dyn | plot_l4_dyn) + 
-    plot_layout(guides = "collect") & 
-    theme(legend.position = "bottom", legend.box = "horizontal", legend.box.just = "left")
-   
+    plot_layout(guides = "collect") & theme(legend.position = "bottom", legend.box = "horizontal", legend.box.just = "left")
    ggsave(file.path(station_folder, "lmoments_scaling_dynamic.png"), combined_lmoments_plot, width = 10, height = 8, bg = "white")
   }
   
-  # 4. QQ Plots for original stats
+  # 4. QQ Plots
   qq_p_zero <- plot_qq_dynamic("p_zero", y_label = expression(p[0]^{(k)}))
   qq_t2     <- plot_qq_dynamic("t2_pos", y_label = expression(t[2]^{(k)}))
   qq_t3     <- plot_qq_dynamic("t3_pos", y_label = expression(t[3]^{(k)}))
@@ -632,12 +578,8 @@ for (current_station_file in station_files) {
   qq_list <- qq_list[!sapply(qq_list, is.null)] 
   
   if(length(qq_list) > 0) {
-   combined_qq_plots <- wrap_plots(qq_list, ncol = 2) + 
-    plot_layout(guides = "collect") & 
-    theme(legend.position = "bottom")
-   
-   ggsave(file.path(station_folder, "qq_validation_plots.png"), 
-          combined_qq_plots, width = 12, height = 10, bg = "white")
+   combined_qq_plots <- wrap_plots(qq_list, ncol = 2) + plot_layout(guides = "collect") & theme(legend.position = "bottom")
+   ggsave(file.path(station_folder, "qq_validation_plots.png"), combined_qq_plots, width = 12, height = 10, bg = "white")
   }
   
   # 5. QQ Plots for L-Moments
@@ -650,12 +592,74 @@ for (current_station_file in station_files) {
   qq_l_list <- qq_l_list[!sapply(qq_l_list, is.null)] 
   
   if(length(qq_l_list) > 0) {
-   combined_qq_lmoments <- wrap_plots(qq_l_list, ncol = 2) + 
-    plot_layout(guides = "collect") & 
-    theme(legend.position = "bottom")
+   combined_qq_lmoments <- wrap_plots(qq_l_list, ncol = 2) + plot_layout(guides = "collect") & theme(legend.position = "bottom")
+   ggsave(file.path(station_folder, "qq_lmoments_validation.png"), combined_qq_lmoments, width = 12, height = 10, bg = "white")
+  }
+  
+  # =====================================================================
+  # 6. DIRECT VS INDIRECT (L2/L1) t2 COMPARISON PLOT
+  # =====================================================================
+  emp_t2_data <- final_summary_df %>%
+   select(k_hours, value = t2_pos) %>%
+   filter(!is.na(value)) %>%
+   mutate(Data_Type = ifelse(k_hours >= 24, "Calib. data", "Valid. data"))
+  
+  k_star_t2 <- 24
+  q_k_star_t2 <- emp_t2_data$value[emp_t2_data$k_hours == k_star_t2]
+  max_k_t2 <- max(emp_t2_data$k_hours, na.rm = TRUE)
+  k_smooth_t2 <- exp(seq(log(1), log(max_k_t2), length.out = 500))
+  
+  if(length(q_k_star_t2) > 0) {
+   # Direct t2 Models
+   param_W2p <- optimized_parameters_df %>% filter(Statistic == "t2_pos", Model == "Weibull_2p")
+   pred_direct_W2p <- if(nrow(param_W2p) > 0) H_W_2p(k_smooth_t2, param_W2p$H0[1], k_star_t2, q_k_star_t2, param_W2p$Param_a[1]) else rep(NA, length(k_smooth_t2))
    
-   ggsave(file.path(station_folder, "qq_lmoments_validation.png"), 
-          combined_qq_lmoments, width = 12, height = 10, bg = "white")
+   param_L2p <- optimized_parameters_df %>% filter(Statistic == "t2_pos", Model == "PowerLaw_2p")
+   pred_direct_L2p <- if(nrow(param_L2p) > 0) H_L_2p(k_smooth_t2, param_L2p$H0[1], k_star_t2, q_k_star_t2, param_L2p$Param_b[1]) else rep(NA, length(k_smooth_t2))
+   
+   # Indirect (L2/L1) Models - both using perfectly matched 'c' exponents!
+   param_l1 <- optimized_parameters_df %>% filter(Statistic == "l1_pos", Model == "PowerDecay_3p")
+   param_l2 <- optimized_parameters_df %>% filter(Statistic == "l2_pos", Model == "PowerDecay_3p")
+   
+   if(nrow(param_l1) > 0 && nrow(param_l2) > 0) {
+    pred_l1 <- H_PowerDecay(k_smooth_t2, param_l1$Param_a[1], param_l1$Param_b[1], param_l1$Param_c[1])
+    pred_l2 <- H_PowerDecay(k_smooth_t2, param_l2$Param_a[1], param_l2$Param_b[1], param_l2$Param_c[1])
+    pred_indirect_t2 <- pred_l2 / pred_l1
+   } else {
+    pred_indirect_t2 <- rep(NA, length(k_smooth_t2))
+   }
+   
+   smooth_data_t2 <- data.frame(
+    Scale_k = rep(k_smooth_t2, 3),
+    Model = c(rep("Direct: Weibull_2p", length(k_smooth_t2)),
+              rep("Direct: PowerLaw_2p", length(k_smooth_t2)),
+              rep("Indirect: L2/L1", length(k_smooth_t2))),
+    value = c(pred_direct_W2p, pred_direct_L2p, pred_indirect_t2)
+   ) %>% filter(!is.na(value))
+   
+   line_colors_comp <- c("Direct: Weibull_2p" = "blue", "Direct: PowerLaw_2p" = "red", "Indirect: L2/L1" = "darkgreen")
+   line_types_comp <- c("Direct: Weibull_2p" = "dashed", "Direct: PowerLaw_2p" = "dashed", "Indirect: L2/L1" = "solid")
+   custom_breaks_comp <- c(1, 6, 12, 24, 120, 240)
+   custom_breaks_comp <- custom_breaks_comp[custom_breaks_comp <= max_k_t2] 
+   
+   p_comparison <- ggplot() +
+    geom_line(data = smooth_data_t2, aes(x = Scale_k, y = value, color = Model, linetype = Model), linewidth = 1) +
+    geom_point(data = emp_t2_data, aes(x = k_hours, y = value, fill = Data_Type), shape = 21, color = "white", size = 3, stroke = 0.5) +
+    geom_vline(xintercept = 24, linetype = "dotted", color = "darkgray", linewidth = 0.8) +
+    scale_x_log10(breaks = custom_breaks_comp, labels = custom_breaks_comp) +
+    scale_fill_manual(name = "Empirical Data", values = c("Calib. data" = "black", "Valid. data" = "orange")) +
+    scale_color_manual(name = "Fitted Models", values = line_colors_comp) +
+    scale_linetype_manual(name = "Fitted Models", values = line_types_comp) +
+    labs(
+     title = expression("Comparison of Direct vs Indirect Fitting for" ~ t[2]^{(k)}),
+     subtitle = "Comparing t2 direct optimization vs derived t2 = L2 / L1",
+     x = "Temporal scale, k [h]", 
+     y = expression(t[2]^{(k)})
+    ) +
+    theme_bw() +
+    theme(panel.grid.major = element_line(linetype = "dashed", color = "lightgray"), panel.grid.minor = element_blank(), legend.position = "bottom", legend.box = "vertical")
+   
+   ggsave(file.path(station_folder, "t2_direct_vs_indirect_comparison.png"), p_comparison, width = 8, height = 6, bg = "white")
   }
   
   cat("Successfully exported results and plots for:", station_name, "\n")
@@ -668,4 +672,4 @@ for (current_station_file in station_files) {
   message("--------------------------------------------------")
  }) 
  
-} # End of the main station loop
+}

@@ -176,3 +176,145 @@ ggplot(df_long, aes(x = k_hours, y = value, color = variable)) +
 ```
 
 
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+
+# =====================================================================
+# 1. DEFINE MATHEMATICAL MODELS
+# =====================================================================
+
+H_W_2p <- function(k, H0, k_star, q_k_star, a) {
+  power_exponent <- (k / k_star)^a
+  base_fraction <- q_k_star / H0
+  H0 * (base_fraction ^ power_exponent)
+}
+
+H_L_2p <- function(k, H0, k_star, q_k_star, b) {
+  ln_numerator <- log(1 + b * k)
+  ln_denominator <- log(1 + b * k_star)
+  power_exponent <- ln_numerator / ln_denominator
+  base_fraction <- q_k_star / H0
+  H0 * (base_fraction ^ power_exponent)
+}
+
+H_PowerDecay <- function(k, a, b, c) {
+  a + b * (k^(-c))
+}
+
+H_ExpDecay_3p <- function(k, a, b, c) {
+  a + b * exp(-c * k)
+}
+
+# =====================================================================
+# 2. LOAD STATION DATA
+# =====================================================================
+# IMPORTANT: Update this path to your specific station's results directory
+station_folder <- "G:/My Drive/Academic_git/DownScaling/Marginals/QC_d data - Germany/Testing/"
+
+final_summary_df <- readRDS(file.path(station_folder, "final_summary.rds"))
+optimized_params <- readRDS(file.path(station_folder, "optimized_parameters.rds"))
+
+# =====================================================================
+# 3. EXTRACT EMPIRICAL DATA & ANCHOR
+# =====================================================================
+emp_data <- final_summary_df %>%
+  select(k_hours, value = t2_pos) %>%
+  filter(!is.na(value)) %>%
+  mutate(Data_Type = ifelse(k_hours >= 24, "Calib. data", "Valid. data"))
+
+k_star <- 24
+q_k_star_t2 <- emp_data$value[emp_data$k_hours == k_star]
+max_k <- max(emp_data$k_hours, na.rm = TRUE)
+
+if(length(q_k_star_t2) == 0) stop("No 24h anchor found for t2_pos.")
+
+k_smooth <- exp(seq(log(1), log(max_k), length.out = 500))
+
+# =====================================================================
+# 4. CALCULATE PREDICTED CURVES
+# =====================================================================
+
+# --- A. Direct Fit: Weibull 2p for t2 ---
+param_W2p <- optimized_params %>% filter(Statistic == "t2_pos", Model == "Weibull_2p")
+pred_direct_W2p <- H_W_2p(k_smooth, param_W2p$H0[1], k_star, q_k_star_t2, param_W2p$Param_a[1])
+
+# --- B. Direct Fit: PowerLaw 2p for t2 ---
+param_L2p <- optimized_params %>% filter(Statistic == "t2_pos", Model == "PowerLaw_2p")
+pred_direct_L2p <- H_L_2p(k_smooth, param_L2p$H0[1], k_star, q_k_star_t2, param_L2p$Param_b[1])
+
+# --- C. Indirect Fit: Derived from L2 / L1 ---
+# L1 uses the Exponential Decay model
+param_l1 <- optimized_params %>% filter(Statistic == "l1_pos", Model == "ExpDecay_3p")
+# L2 uses the standard Power Decay model
+param_l2 <- optimized_params %>% filter(Statistic == "l2_pos", Model == "PowerDecay_3p")
+
+pred_l1 <- H_ExpDecay_3p(k_smooth, param_l1$Param_a[1], param_l1$Param_b[1], param_l1$Param_c[1])
+pred_l2 <- H_PowerDecay(k_smooth, param_l2$Param_a[1], param_l2$Param_b[1], param_l2$Param_c[1])
+
+# Derived t2
+pred_indirect_t2 <- pred_l2 / pred_l1
+
+# =====================================================================
+# 5. PREPARE PLOTTING DATA
+# =====================================================================
+
+smooth_data <- data.frame(
+  Scale_k = rep(k_smooth, 3),
+  Model = c(rep("Direct: Weibull_2p", length(k_smooth)),
+            rep("Direct: PowerLaw_2p", length(k_smooth)),
+            rep("Indirect: L2/L1", length(k_smooth))),
+  value = c(pred_direct_W2p, pred_direct_L2p, pred_indirect_t2)
+) %>%
+  filter(!is.na(value))
+
+# =====================================================================
+# 6. GENERATE COMPARISON PLOT
+# =====================================================================
+
+line_colors <- c(
+  "Direct: Weibull_2p" = "blue", 
+  "Direct: PowerLaw_2p" = "red",
+  "Indirect: L2/L1" = "darkgreen"
+)
+
+line_types <- c(
+  "Direct: Weibull_2p" = "dashed", 
+  "Direct: PowerLaw_2p" = "dashed",
+  "Indirect: L2/L1" = "solid"
+)
+
+custom_breaks <- c(1, 6, 12, 24, 120, 240)
+custom_breaks <- custom_breaks[custom_breaks <= max_k] 
+
+p_comparison <- ggplot() +
+  geom_line(data = smooth_data, aes(x = Scale_k, y = value, color = Model, linetype = Model), linewidth = 1) +
+  geom_point(data = emp_data, aes(x = k_hours, y = value, fill = Data_Type), 
+             shape = 21, color = "white", size = 3, stroke = 0.5) +
+  geom_vline(xintercept = 24, linetype = "dotted", color = "darkgray", linewidth = 0.8) +
+  scale_x_log10(breaks = custom_breaks, labels = custom_breaks) +
+  scale_fill_manual(name = "Empirical Data", values = c("Calib. data" = "black", "Valid. data" = "orange")) +
+  scale_color_manual(name = "Fitted Models", values = line_colors) +
+  scale_linetype_manual(name = "Fitted Models", values = line_types) +
+  labs(
+    title = expression("Comparison of Direct vs Indirect Fitting for" ~ t[2]^{(k)}),
+    subtitle = "Comparing t2 direct optimization vs derived t2 = (predicted L2) / (predicted L1)",
+    x = "Temporal scale, k [h]", 
+    y = expression(t[2]^{(k)})
+  ) +
+  theme_bw() +
+  theme(
+    panel.grid.major = element_line(linetype = "dashed", color = "lightgray"),
+    panel.grid.minor = element_blank(),
+    legend.position = "bottom",
+    legend.box = "vertical"
+  )
+
+print(p_comparison)
+
+ggsave(file.path(station_folder, "t2_direct_vs_indirect_comparison_exp.png"), 
+       p_comparison, width = 8, height = 6, bg = "white")
+```
+
