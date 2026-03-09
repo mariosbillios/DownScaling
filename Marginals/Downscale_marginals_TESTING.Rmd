@@ -9,10 +9,33 @@ library(DEoptim)
 library(tidyr)
 ```
 
+```{r}
+# =====================================================================
+# 1. DEFINE PATHS & DIRECTORIES
+# =====================================================================
+gdrive_path   <- "G:/My Drive"
+project_path  <- file.path(gdrive_path, "Academic_git/DownScaling")
+data_dir_name <- "QC_d data - Germany" 
+
+# Input and Output Directories
+metadata_dir <- file.path(project_path, "Marginals", data_dir_name, "Metadata")
+plots_dir    <- file.path(project_path, "Marginals", data_dir_name, "Plots")
+
+# Create the Plots directory if it doesn't exist
+dir.create(plots_dir, recursive = TRUE, showWarnings = FALSE)
+
+# =====================================================================
+# 2. LOAD REGIONAL MASTER DATA
+# =====================================================================
+master_rds_path <- file.path(metadata_dir, paste0(data_dir_name, "_Master_List_Filtered.rds"))
+
+cat("Loading Master Regional Data...\n")
+master_regional_data <- readRDS(master_rds_path)
+```
 
 
 ```{r}
-df<-`QC_d data - Germany_Master_List_Filtered`$Final_Summary
+df<-master_regional_data$Final_Summary
 
 #df<-df %>% filter(Station_ID=="DE_00020")
 df<-df[,-c(1)]
@@ -20,9 +43,9 @@ df<-df[,-c(1)]
 df<-df%>%pivot_longer(cols = !c(k_hours,Station_ID),names_to = "Stat",values_to = "Val")
 
 
-ggplot(subset(df, Stat %in% c("t2_pos")), 
+ggplot(subset(df, Stat %in% c("p_zero")), 
        aes(x = k_hours, y = Val, colour = Station_ID)) +
-  geom_line()+theme(legend.position = "none")
+  geom_line()+theme(legend.position = "none")+scale_x_log10()
 
 
 
