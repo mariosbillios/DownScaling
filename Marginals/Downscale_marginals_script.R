@@ -228,7 +228,7 @@ station_files <- list.files(path = data_dir, pattern = "\\.txt$", full.names = T
 
 # =====================================================================
 # =====================================================================
-station_files<-station_files[1]
+
 
 for (current_station_file in station_files) {
  

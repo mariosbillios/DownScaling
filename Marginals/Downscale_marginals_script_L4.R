@@ -209,7 +209,7 @@ project_path <- file.path(gdrive_path, "Academic_git/DownScaling")
 data_dir_name <- "QC_d data - Germany" 
 data_dir <- file.path(gdrive_path, "General_Data/GSDR", data_dir_name)
 
-individual_dir <- file.path(project_path, "Marginals",data_dir_name,"Station_Results")
+individual_dir <- file.path(project_path, "Marginals",data_dir_name,"Testing")
 
 station_files <- list.files(path = data_dir, pattern = "\\.txt$", full.names = TRUE)
 
