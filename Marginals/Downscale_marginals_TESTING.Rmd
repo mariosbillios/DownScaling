@@ -6,315 +6,44 @@ library(lubridate)
 library(DEoptim)
 library(lmomco)
 library(DEoptim)
-```
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-```{r}
-library(ggplot2)
-library(dplyr)
-library(patchwork)
-
-global_expected_models <- unique(optimized_parameters$Model)
-global_expected_data   <- c("Calib. data", "Valid. data")
-
-plot_statistic_dynamic <- function(stat_name, y_label = stat_name, show_legend = FALSE) {
-  
-  # 1. Prepare Empirical Data points
-  emp_data <- final_summary %>%
-    select(k_hours, value = !!sym(stat_name)) %>%
-    filter(!is.na(value)) %>%
-    mutate(Data_Type = ifelse(k_hours >= 24, "Calib. data", "Valid. data"))
-  
-  max_k <- max(emp_data$k_hours, na.rm = TRUE)
-  
-  q_k_star_val <- emp_data$value[emp_data$k_hours == 24]
-  if(length(q_k_star_val) == 0) {
-    warning(paste("No 24h anchor found for", stat_name, "- skipping plot."))
-    return(NULL) 
-  }
-  
-  k_smooth <- exp(seq(log(1), log(max_k), length.out = 500))
-  params <- optimized_parameters %>% filter(Statistic == stat_name)
-  
-  smooth_lines_list <- list()
-  for (i in 1:nrow(params)) {
-    m_name <- params$Model[i]
-    H0_val <- params$H0[i]
-    a_val  <- params$Param_a[i]
-    b_val  <- params$Param_b[i]
-    
-    pred_smooth <- switch(m_name,
-      "Weibull_3p"  = H_W_3p(k_smooth, H0_val, a_val, b_val),
-      "PowerLaw_3p" = H_L_3p(k_smooth, H0_val, a_val, b_val),
-      "Weibull_2p"  = H_W_2p(k_smooth, H0_val, 24, q_k_star_val, a_val),
-      "PowerLaw_2p" = H_L_2p(k_smooth, H0_val, 24, q_k_star_val, b_val),
-      "Weibull_1p"  = H_W_1p_pdry(k_smooth, 24, q_k_star_val, a_val),
-      "PowerLaw_1p" = H_L_1p_pdry(k_smooth, 24, q_k_star_val, b_val)
-    )
-    smooth_lines_list[[i]] <- data.frame(Scale_k = k_smooth, Model = m_name, value = pred_smooth)
-  }
-  
-  smooth_data <- bind_rows(smooth_lines_list)
-  
-  line_colors <- c("Weibull_1p" = "blue", "PowerLaw_1p" = "red",
-                   "Weibull_2p" = "blue", "PowerLaw_2p" = "red",
-                   "Weibull_3p" = "darkblue", "PowerLaw_3p" = "darkred")
-  
-  line_types <- c("Weibull_1p" = "solid", "PowerLaw_1p" = "solid",
-                  "Weibull_2p" = "dashed", "PowerLaw_2p" = "dashed",
-                  "Weibull_3p" = "dotted", "PowerLaw_3p" = "dotted")
-  
-  custom_breaks <- c(1, 6, 12, 24, 120, 240)
-  custom_breaks <- custom_breaks[custom_breaks <= max_k] 
-  
-  # --- UPDATED GUIDES ---
-  # Data on the left (order=1, 1 column), Models on the right (order=2, 2 rows)
-  fill_guide  <- if(show_legend) guide_legend(order = 1, ncol = 1) else "none"
-  line_guide  <- if(show_legend) guide_legend(order = 2, nrow = 2) else "none"
-
-  p <- ggplot() +
-    geom_line(data = smooth_data, aes(x = Scale_k, y = value, color = Model, linetype = Model), linewidth = 1) +
-    geom_point(data = emp_data, aes(x = k_hours, y = value, fill = Data_Type), 
-               shape = 21, color = "white", size = 3, stroke = 0.5) +
-    scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.2)) + 
-    geom_vline(xintercept = 24, linetype = "dashed", color = "darkgray", linewidth = 0.8) +
-    scale_x_log10(breaks = custom_breaks, labels = custom_breaks) +
-    
-    scale_fill_manual(name = "", values = c("Calib. data" = "black", "Valid. data" = "orange"),
-                      limits = global_expected_data, drop = FALSE, guide = fill_guide) +
-    scale_color_manual(name = "", values = line_colors, limits = global_expected_models, 
-                       drop = FALSE, guide = line_guide) +
-    scale_linetype_manual(name = "", values = line_types, limits = global_expected_models, 
-                          drop = FALSE, guide = line_guide) +
-    
-    labs(x = "Temporal scale, k [h]", y = y_label) +
-    theme_bw() +
-    theme(
-      panel.grid.major = element_line(linetype = "dashed", color = "lightgray"),
-      panel.grid.minor = element_blank(),
-      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
-      axis.text.y = element_text(angle = 90, vjust = 0.5, hjust = 0.5),
-      legend.key = element_blank(),
-      legend.background = element_blank()
-    )
-  
-  return(p)
-}
-
-# 2. Generate plots
-plot_p_zero <- plot_statistic_dynamic("p_zero", y_label = expression(p[0]^{(k)}), show_legend = TRUE)
-plot_t2     <- plot_statistic_dynamic("t2_pos", y_label = expression(t[2]^{(k)}))
-plot_t3     <- plot_statistic_dynamic("t3_pos", y_label = expression(t[3]^{(k)}))
-plot_t4     <- plot_statistic_dynamic("t4_pos", y_label = expression(t[4]^{(k)}))
-
-# 3. Combine with Patchwork
-combined_plot <- (plot_p_zero | plot_t2) / (plot_t3 | plot_t4) + 
-  plot_layout(guides = "collect") & 
-  theme(
-    legend.position = "bottom",
-    legend.box = "horizontal",     # Side-by-side groups
-    legend.box.just = "left",
-    legend.spacing.x = unit(0.5, "cm")
-  )
-
-print(combined_plot)
-```
-
-
-```{r}
-df_long <- df %>%
-  select(k_hours, l1_pos, l2_pos, l3_pos,t2_pos,t3_pos,t4_pos,p_zero)
-
-
-
-df_long<-df_long%>%mutate(l4_pos=t4_pos*l2_pos)
-
-df_long<-df_long%>%pivot_longer(-k_hours, names_to = "variable", values_to = "value")
-
-
-ggplot(df_long, aes(x = k_hours, y = value, color = variable)) +
-  geom_line(size = 1) +
-  geom_point() +
-  theme_minimal() +
-  labs(x = "Hours", y = "Value", color = "Statistic")+
- scale_x_log10() 
-
-
-
-
-df_long <- df %>%
-  select(k_hours,t2_pos)
-
-
-df_long<-df_long%>%pivot_longer(-k_hours, names_to = "variable", values_to = "value")
-
-
-ggplot(df_long, aes(x = k_hours, y = value, color = variable)) +
-  geom_line(size = 1) +
-  geom_point() +
-  theme_minimal() +
-  labs(x = "Hours", y = "Value", color = "Statistic")
-
-
-```
-
-
-
-```{r}
-library(dplyr)
-library(ggplot2)
 library(tidyr)
-
-# =====================================================================
-# 1. DEFINE MATHEMATICAL MODELS
-# =====================================================================
-
-H_W_2p <- function(k, H0, k_star, q_k_star, a) {
-  power_exponent <- (k / k_star)^a
-  base_fraction <- q_k_star / H0
-  H0 * (base_fraction ^ power_exponent)
-}
-
-H_L_2p <- function(k, H0, k_star, q_k_star, b) {
-  ln_numerator <- log(1 + b * k)
-  ln_denominator <- log(1 + b * k_star)
-  power_exponent <- ln_numerator / ln_denominator
-  base_fraction <- q_k_star / H0
-  H0 * (base_fraction ^ power_exponent)
-}
-
-H_PowerDecay <- function(k, a, b, c) {
-  a + b * (k^(-c))
-}
-
-H_ExpDecay_3p <- function(k, a, b, c) {
-  a + b * exp(-c * k)
-}
-
-# =====================================================================
-# 2. LOAD STATION DATA
-# =====================================================================
-# IMPORTANT: Update this path to your specific station's results directory
-station_folder <- "G:/My Drive/Academic_git/DownScaling/Marginals/QC_d data - Germany/Testing/"
-
-final_summary_df <- readRDS(file.path(station_folder, "final_summary.rds"))
-optimized_params <- readRDS(file.path(station_folder, "optimized_parameters.rds"))
-
-# =====================================================================
-# 3. EXTRACT EMPIRICAL DATA & ANCHOR
-# =====================================================================
-emp_data <- final_summary_df %>%
-  select(k_hours, value = t2_pos) %>%
-  filter(!is.na(value)) %>%
-  mutate(Data_Type = ifelse(k_hours >= 24, "Calib. data", "Valid. data"))
-
-k_star <- 24
-q_k_star_t2 <- emp_data$value[emp_data$k_hours == k_star]
-max_k <- max(emp_data$k_hours, na.rm = TRUE)
-
-if(length(q_k_star_t2) == 0) stop("No 24h anchor found for t2_pos.")
-
-k_smooth <- exp(seq(log(1), log(max_k), length.out = 500))
-
-# =====================================================================
-# 4. CALCULATE PREDICTED CURVES
-# =====================================================================
-
-# --- A. Direct Fit: Weibull 2p for t2 ---
-param_W2p <- optimized_params %>% filter(Statistic == "t2_pos", Model == "Weibull_2p")
-pred_direct_W2p <- H_W_2p(k_smooth, param_W2p$H0[1], k_star, q_k_star_t2, param_W2p$Param_a[1])
-
-# --- B. Direct Fit: PowerLaw 2p for t2 ---
-param_L2p <- optimized_params %>% filter(Statistic == "t2_pos", Model == "PowerLaw_2p")
-pred_direct_L2p <- H_L_2p(k_smooth, param_L2p$H0[1], k_star, q_k_star_t2, param_L2p$Param_b[1])
-
-# --- C. Indirect Fit: Derived from L2 / L1 ---
-# L1 uses the Exponential Decay model
-param_l1 <- optimized_params %>% filter(Statistic == "l1_pos", Model == "ExpDecay_3p")
-# L2 uses the standard Power Decay model
-param_l2 <- optimized_params %>% filter(Statistic == "l2_pos", Model == "PowerDecay_3p")
-
-pred_l1 <- H_ExpDecay_3p(k_smooth, param_l1$Param_a[1], param_l1$Param_b[1], param_l1$Param_c[1])
-pred_l2 <- H_PowerDecay(k_smooth, param_l2$Param_a[1], param_l2$Param_b[1], param_l2$Param_c[1])
-
-# Derived t2
-pred_indirect_t2 <- pred_l2 / pred_l1
-
-# =====================================================================
-# 5. PREPARE PLOTTING DATA
-# =====================================================================
-
-smooth_data <- data.frame(
-  Scale_k = rep(k_smooth, 3),
-  Model = c(rep("Direct: Weibull_2p", length(k_smooth)),
-            rep("Direct: PowerLaw_2p", length(k_smooth)),
-            rep("Indirect: L2/L1", length(k_smooth))),
-  value = c(pred_direct_W2p, pred_direct_L2p, pred_indirect_t2)
-) %>%
-  filter(!is.na(value))
-
-# =====================================================================
-# 6. GENERATE COMPARISON PLOT
-# =====================================================================
-
-line_colors <- c(
-  "Direct: Weibull_2p" = "blue", 
-  "Direct: PowerLaw_2p" = "red",
-  "Indirect: L2/L1" = "darkgreen"
-)
-
-line_types <- c(
-  "Direct: Weibull_2p" = "dashed", 
-  "Direct: PowerLaw_2p" = "dashed",
-  "Indirect: L2/L1" = "solid"
-)
-
-custom_breaks <- c(1, 6, 12, 24, 120, 240)
-custom_breaks <- custom_breaks[custom_breaks <= max_k] 
-
-p_comparison <- ggplot() +
-  geom_line(data = smooth_data, aes(x = Scale_k, y = value, color = Model, linetype = Model), linewidth = 1) +
-  geom_point(data = emp_data, aes(x = k_hours, y = value, fill = Data_Type), 
-             shape = 21, color = "white", size = 3, stroke = 0.5) +
-  geom_vline(xintercept = 24, linetype = "dotted", color = "darkgray", linewidth = 0.8) +
-  scale_x_log10(breaks = custom_breaks, labels = custom_breaks) +
-  scale_fill_manual(name = "Empirical Data", values = c("Calib. data" = "black", "Valid. data" = "orange")) +
-  scale_color_manual(name = "Fitted Models", values = line_colors) +
-  scale_linetype_manual(name = "Fitted Models", values = line_types) +
-  labs(
-    title = expression("Comparison of Direct vs Indirect Fitting for" ~ t[2]^{(k)}),
-    subtitle = "Comparing t2 direct optimization vs derived t2 = (predicted L2) / (predicted L1)",
-    x = "Temporal scale, k [h]", 
-    y = expression(t[2]^{(k)})
-  ) +
-  theme_bw() +
-  theme(
-    panel.grid.major = element_line(linetype = "dashed", color = "lightgray"),
-    panel.grid.minor = element_blank(),
-    legend.position = "bottom",
-    legend.box = "vertical"
-  )
-
-print(p_comparison)
-
-ggsave(file.path(station_folder, "t2_direct_vs_indirect_comparison_exp.png"), 
-       p_comparison, width = 8, height = 6, bg = "white")
 ```
+
+
+
+```{r}
+df<-`QC_d data - Germany_Master_List_Filtered`$Final_Summary
+
+#df<-df %>% filter(Station_ID=="DE_00020")
+df<-df[,-c(1)]
+
+df<-df%>%pivot_longer(cols = !c(k_hours,Station_ID),names_to = "Stat",values_to = "Val")
+
+
+ggplot(subset(df, Stat %in% c("t2_pos")), 
+       aes(x = k_hours, y = Val, colour = Station_ID)) +
+  geom_line()+theme(legend.position = "none")
+
+
+
+
+
+```
+
+```{r}
+df_plot <- df %>%
+  filter(Stat == "t2_pos") %>% 
+  mutate(k_hours = as.factor(k_hours))
+
+# 3. Create the boxplot
+ggplot(df_plot, aes(x = k_hours, y = Val, fill = k_hours)) +
+  geom_boxplot() +
+  labs(title = "Distribution of Mean Values by k_hours",
+       x = "k_hours (Time Window)",
+       y = "Value") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+
 
