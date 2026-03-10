@@ -1088,6 +1088,76 @@ cat("- Scatters and Regression Data saved to:", xyz_dir, "\n")
 
 
 
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(ggplot2)
+
+# =====================================================================
+# 1. DEFINE PATHS & DIRECTORIES 
+# =====================================================================
+gdrive_path   <- "G:/My Drive"
+project_path  <- file.path(gdrive_path, "Academic_git/DownScaling")
+data_dir_name <- "QC_d data - Germany" 
+
+metadata_dir  <- file.path(project_path, "Marginals", data_dir_name, "Metadata")
+plots_dir     <- file.path(project_path, "Marginals", data_dir_name, "Plots")
+
+# Ensure plots directory exists
+dir.create(plots_dir, recursive = TRUE, showWarnings = FALSE)
+
+# =====================================================================
+# 2. LOAD DATA
+# =====================================================================
+cat("Loading Master Regional Data...\n")
+master_rds_path <- file.path(metadata_dir, paste0(data_dir_name, "_Master_List_Filtered.rds"))
+
+# Read the updated master object
+master_regional_data <- readRDS(master_rds_path)
+
+# Extract the new Scale Data Loss dataframe
+df_data_loss <- master_regional_data$Scale_Data_Loss
+
+# =====================================================================
+# 3. GENERATE BOXPLOTS FOR DATA LOSS
+# =====================================================================
+cat("Generating Data Loss Boxplots...\n")
+
+# Prepare the data by ensuring the scale is treated as a sorted factor
+df_plot <- df_data_loss %>%
+  mutate(Scale_factor = factor(Scale_k_hours, levels = sort(unique(Scale_k_hours)))) %>%
+  filter(!is.na(Dropped_Pct))
+
+# Generate the plot
+p_loss <- ggplot(df_plot, aes(x = Scale_factor, y = Dropped_Pct, fill = Scale_factor)) +
+  geom_boxplot(outlier.size = 0.5, outlier.alpha = 0.5, linewidth = 0.4) +
+  
+  # Keep styling consistent with your previous plots
+  scale_fill_viridis_d(option = "turbo", guide = "none") +
+  
+  labs(
+    title = "Data Loss During Temporal Aggregation",
+    subtitle = "Percentage of theoretical bins dropped due to exceeding NA thresholds",
+    x = "Scale k (hours)",
+    y = "Dropped Bins (%)"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5, size = 16),
+    plot.subtitle = element_text(hjust = 0.5, color = "darkgray"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(), # Cleaner look for boxplots
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+# =====================================================================
+# 4. EXPORT PLOT
+# =====================================================================
+output_file <- file.path(plots_dir, "Regional_Data_Loss_Boxplots.png")
+ggsave(output_file, p_loss, width = 12, height = 7, bg = "white", dpi = 300)
+
+cat("Success! Data loss boxplots saved to:\n", output_file, "\n")
+```
 
 
 
