@@ -1159,6 +1159,71 @@ ggsave(output_file, p_loss, width = 12, height = 7, bg = "white", dpi = 300)
 cat("Success! Data loss boxplots saved to:\n", output_file, "\n")
 ```
 
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(writexl)
+
+# =====================================================================
+# 1. DEFINE PATHS & DIRECTORIES 
+# =====================================================================
+gdrive_path   <- "G:/My Drive"
+project_path  <- file.path(gdrive_path, "Academic_git/DownScaling")
+data_dir_name <- "QC_d data - Germany" 
+metadata_dir  <- file.path(project_path, "Marginals", data_dir_name, "Metadata")
+
+# =====================================================================
+# 2. LOAD DATA
+# =====================================================================
+cat("Loading Master Regional Data...\n")
+master_rds_path <- file.path(metadata_dir, paste0(data_dir_name, "_Master_List_Filtered.rds"))
+master_regional_data <- readRDS(master_rds_path)
+df_data_loss <- master_regional_data$Scale_Data_Loss
+
+# =====================================================================
+# 3. CALCULATE OUTLIERS & IQR COUNTS
+# =====================================================================
+cat("Calculating Station Distributions...\n")
+
+outlier_summary_df <- df_data_loss %>%
+  filter(!is.na(Dropped_Pct)) %>%
+  group_by(Scale_k_hours) %>%
+  summarise(
+    Total_Stations = n(),
+    
+    # Calculate Boxplot Boundaries
+    Q1 = quantile(Dropped_Pct, 0.25),
+    Q3 = quantile(Dropped_Pct, 0.75),
+    IQR = Q3 - Q1,
+    Lower_Bound = Q1 - 1.5 * IQR,
+    Upper_Bound = Q3 + 1.5 * IQR,
+    
+    # Count Stations in each zone
+    Inside_IQR_Box = sum(Dropped_Pct >= Q1 & Dropped_Pct <= Q3),
+    Total_Outliers = sum(Dropped_Pct < Lower_Bound | Dropped_Pct > Upper_Bound),
+    Outliers_High  = sum(Dropped_Pct > Upper_Bound),
+    Outliers_Low   = sum(Dropped_Pct < Lower_Bound),
+    
+    # Non-outliers are total stations minus the outliers
+    Inside_Whiskers_Normal = Total_Stations - Total_Outliers,
+    
+    # Calculate Outlier Percentage
+    Outlier_Percentage = round((Total_Outliers / Total_Stations) * 100, 2),
+    
+    .groups = "drop"
+  ) %>%
+  arrange(Scale_k_hours)
+
+# =====================================================================
+# 4. EXPORT TO EXCEL
+# =====================================================================
+plots_dir <- file.path(project_path, "Marginals", data_dir_name, "Plots")
+excel_out_path <- file.path(plots_dir, "Data_Loss_Outlier_Summary.xlsx")
+
+write_xlsx(outlier_summary_df, excel_out_path)
+
+cat("Success! Outlier summary table exported to:\n", excel_out_path, "\n")
+```
 
 
 
