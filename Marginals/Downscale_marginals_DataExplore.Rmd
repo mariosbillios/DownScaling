@@ -631,3 +631,464 @@ if(length(ecdf_ape_list) > 0) {
 }
 ```
 
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(patchwork)
+library(readxl)
+library(writexl)
+library(sf)
+
+# =====================================================================
+# 1. DEFINE PATHS & DIRECTORIES 
+# =====================================================================
+gdrive_path   <- "G:/My Drive"
+project_path  <- file.path(gdrive_path, "Academic_git/DownScaling")
+data_dir_name <- "QC_d data - Germany" 
+
+metadata_dir  <- file.path(project_path, "Marginals", data_dir_name, "Metadata")
+plots_dir     <- file.path(project_path, "Marginals", data_dir_name, "Plots")
+maps_dir      <- file.path(gdrive_path, "General_Data/Maps", data_dir_name)
+
+# =====================================================================
+# 2. LOAD DATA
+# =====================================================================
+cat("Loading Data...\n")
+
+# Load Master Regional Data
+master_rds_path <- file.path(metadata_dir, paste0(data_dir_name, "_Master_List_Filtered.rds"))
+master_regional_data <- readRDS(master_rds_path)
+final_summary <- master_regional_data$Final_Summary
+
+# Load Metadata to get Station Coordinates
+meta_xlsx_path <- file.path(metadata_dir, paste0(data_dir_name, "_Master_Metadata.xlsx"))
+metadata_coords <- read_xlsx(meta_xlsx_path) %>%
+  select(Station_ID, Latitude, Longitude)
+
+# Define the statistics we want to analyze
+stats_of_interest <- c("p_zero", "l1_all", "l1_pos", "t2_pos", "t3_pos", "t4_pos")
+
+# Filter final_summary for just the needed columns
+df_stats <- final_summary %>%
+  select(Station_ID, k_hours, all_of(stats_of_interest))
+
+# =====================================================================
+# 3. TASK 1: EXPORT EXCEL & GENERATE BOXPLOTS
+# =====================================================================
+cat("Exporting Data to Excel...\n")
+# Export the clean summary values to Excel
+excel_out_path <- file.path(plots_dir, "Empirical_Statistics_All_Scales.xlsx")
+write_xlsx(df_stats, excel_out_path)
+cat("Excel saved to:", excel_out_path, "\n")
+
+cat("Generating Empirical Boxplots...\n")
+# Pivot data to long format for faceted boxplots
+df_long <- df_stats %>%
+  pivot_longer(cols = all_of(stats_of_interest), names_to = "Statistic", values_to = "Value") %>%
+  mutate(Scale_k_factor = factor(k_hours, levels = sort(unique(k_hours)))) %>%
+  filter(!is.na(Value))
+
+# Generate the massive boxplot grid
+p_box <- ggplot(df_long, aes(x = Scale_k_factor, y = Value, fill = Scale_k_factor)) +
+  geom_boxplot(outlier.size = 0.5, outlier.alpha = 0.3, linewidth = 0.4) +
+  facet_wrap(~ Statistic, scales = "free_y", ncol = 2) +
+  scale_fill_viridis_d(option = "turbo", guide = "none") +
+  labs(
+    title = "Empirical Statistics Distribution Across Temporal Scales",
+    x = "Scale k (hours)",
+    y = "Statistic Value"
+  ) +
+  theme_bw() +
+  theme(
+    strip.background = element_rect(fill = "whitesmoke"),
+    strip.text = element_text(face = "bold", size = 12),
+    plot.title = element_text(face = "bold", hjust = 0.5, size = 16),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+# Save the Boxplots
+ggsave(file.path(plots_dir, "Empirical_Statistics_Boxplots.png"), p_box, width = 12, height = 10, bg = "white", dpi = 300)
+
+# =====================================================================
+# 4. TASK 2: GENERATE MAPS FOR ALL SCALES
+# =====================================================================
+cat("Preparing Spatial Data for Maps...\n")
+
+# Find the shapefile in your maps directory
+shp_file <- list.files(maps_dir, pattern = "\\.shp$", full.names = TRUE)[1]
+if (is.na(shp_file)) {
+  stop("Could not find a .shp file in the specified maps_dir!")
+}
+
+# Read the shapefile and force CRS to EPSG:3857
+germany_shp <- st_read(shp_file, quiet = TRUE) %>% 
+  st_transform(crs = 3857)
+
+# Join the statistics with the coordinates
+map_data <- df_stats %>%
+  left_join(metadata_coords, by = "Station_ID") %>%
+  filter(!is.na(Latitude) & !is.na(Longitude))
+
+# Convert the dataframe to an sf object
+# We assume standard lat/lon are WGS84 (EPSG:4326), then transform to match shapefile (EPSG:3857)
+map_sf <- st_as_sf(map_data, coords = c("Longitude", "Latitude"), crs = 4326) %>%
+  st_transform(crs = 3857)
+
+# Loop through each statistic and create a map faceted by temporal scale
+for (stat in stats_of_interest) {
+  cat("Generating maps for:", stat, "...\n")
+  
+  # Filter out NAs for the specific statistic to avoid blank gray dots
+  plot_sf <- map_sf %>% filter(!is.na(.data[[stat]]))
+  
+  p_map <- ggplot() +
+    # Layer 1: The Germany Base Map
+    geom_sf(data = germany_shp, fill = "whitesmoke", color = "darkgray", linewidth = 0.3) +
+    
+    # Layer 2: The Station Points mapped by the statistic value
+    geom_sf(data = plot_sf, aes(color = .data[[stat]]), size = 1.2, alpha = 0.8) +
+    
+    # Facet by scale
+    facet_wrap(~ k_hours, ncol = 5) +
+    
+    # Aesthetics
+    scale_color_viridis_c(option = "turbo", name = stat) +
+    theme_void() + # Removes axes, lat/lon grids, and background
+    theme(
+      legend.position = "bottom",
+      legend.key.width = unit(2, "cm"),
+      strip.text = element_text(face = "bold", size = 10, margin = margin(b = 5, t = 5)),
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 18, margin = margin(b = 15)),
+      plot.margin = margin(10, 10, 10, 10)
+    ) +
+    labs(
+      title = paste("Spatial Distribution of", stat, "Across Scales"),
+      subtitle = "Coordinate Reference System: EPSG:3857"
+    )
+  
+  # Save the mapped facets
+  map_out_file <- file.path(plots_dir, paste0("Spatial_Map_", stat, ".png"))
+  ggsave(map_out_file, p_map, width = 16, height = 12, bg = "white", dpi = 300)
+}
+
+cat("\n--- ALL TASKS COMPLETE ---\n")
+```
+
+
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(patchwork)
+
+# =====================================================================
+# 1. DEFINE PATHS & DIRECTORIES 
+# =====================================================================
+gdrive_path   <- "G:/My Drive"
+project_path  <- file.path(gdrive_path, "Academic_git/DownScaling")
+data_dir_name <- "QC_d data - Germany" 
+
+metadata_dir  <- file.path(project_path, "Marginals", data_dir_name, "Metadata")
+plots_dir     <- file.path(project_path, "Marginals", data_dir_name, "Plots")
+
+# Create a subfolder for these specific spatial scatter plots to keep things organized
+spatial_scatter_dir <- file.path(plots_dir, "Spatial_Scatters_XYZ")
+dir.create(spatial_scatter_dir, recursive = TRUE, showWarnings = FALSE)
+
+# =====================================================================
+# 2. LOAD DATA & EXTRACT X, Y, Z
+# =====================================================================
+cat("Loading Data...\n")
+
+# Load Master Regional Data
+master_rds_path <- file.path(metadata_dir, paste0(data_dir_name, "_Master_List_Filtered.rds"))
+master_regional_data <- readRDS(master_rds_path)
+final_summary <- master_regional_data$Final_Summary
+
+# Load Metadata to get X (Longitude), Y (Latitude), and Z (Elevation_m)
+meta_rds_path <- file.path(metadata_dir, paste0(data_dir_name, "_Master_Metadata.rds"))
+metadata_xyz <- readRDS(meta_rds_path) %>%
+  select(Station_ID, Longitude, Latitude, Elevation_m)
+
+# Merge the summary statistics with the spatial coordinates
+df_spatial <- final_summary %>%
+  left_join(metadata_xyz, by = "Station_ID")
+
+# Define the statistics and geographic variables
+stats_of_interest <- c("p_zero", "l1_all", "l1_pos", "t2_pos", "t3_pos", "t4_pos")
+geo_vars <- list(
+  "Longitude"   = list(label = "X (Longitude)", color = "#1b9e77"),
+  "Latitude"    = list(label = "Y (Latitude)", color = "#d95f02"),
+  "Elevation_m" = list(label = "Z (Elevation, meters)", color = "#7570b3")
+)
+
+# =====================================================================
+# 3. GENERATE SCATTER PLOTS: STATISTIC VS X, Y, Z
+# =====================================================================
+cat("Generating Spatial XYZ Scatter Plots...\n")
+
+# Loop through each statistic
+for (stat in stats_of_interest) {
+  
+  # Filter out missing values for the current statistic
+  df_stat <- df_spatial %>%
+    filter(!is.na(.data[[stat]])) %>%
+    mutate(Scale_Label = paste0(k_hours, "h")) %>%
+    mutate(Scale_Label = factor(Scale_Label, levels = paste0(sort(unique(k_hours)), "h")))
+  
+  # Loop through X, Y, Z
+  for (geo_name in names(geo_vars)) {
+    geo_label <- geo_vars[[geo_name]]$label
+    geo_color <- geo_vars[[geo_name]]$color
+    
+    # Generate the scatter plot faceted by scale
+    p_scatter <- ggplot(df_stat, aes(x = .data[[geo_name]], y = .data[[stat]])) +
+      # Points with transparency to handle overlapping stations
+      geom_point(alpha = 0.4, size = 1.5, color = geo_color) +
+      
+      # Add a linear trendline to visualize geographic/elevation relationships
+      geom_smooth(method = "lm", color = "black", linetype = "dashed", linewidth = 0.8, se = FALSE) +
+      
+      # Facet by temporal scale
+      facet_wrap(~ Scale_Label, scales = "free_y", ncol = 5) +
+      
+      labs(
+        title = paste("Relationship:", stat, "vs", geo_label),
+        subtitle = "Across all available temporal scales (k)",
+        x = geo_label,
+        y = stat
+      ) +
+      theme_bw() +
+      theme(
+        strip.background = element_rect(fill = "whitesmoke"),
+        strip.text = element_text(face = "bold"),
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 14),
+        plot.subtitle = element_text(hjust = 0.5, color = "darkgray"),
+        panel.grid.minor = element_blank()
+      )
+    
+    # Save the plot
+    out_name <- paste0("Scatter_", stat, "_vs_", geo_name, ".png")
+    ggsave(file.path(spatial_scatter_dir, out_name), p_scatter, width = 14, height = 10, bg = "white", dpi = 300)
+  }
+}
+
+cat("Success! All XYZ scatter plots saved to:\n", spatial_scatter_dir, "\n")
+```
+
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(patchwork)
+library(sf)
+library(writexl)
+library(readxl)
+
+# =====================================================================
+# 1. DEFINE PATHS & DIRECTORIES 
+# =====================================================================
+gdrive_path   <- "G:/My Drive"
+project_path  <- file.path(gdrive_path, "Academic_git/DownScaling")
+data_dir_name <- "QC_d data - Germany" 
+
+metadata_dir  <- file.path(project_path, "Marginals", data_dir_name, "Metadata")
+plots_dir     <- file.path(project_path, "Marginals", data_dir_name, "Plots")
+maps_dir      <- file.path(gdrive_path, "General_Data/Maps", data_dir_name)
+
+# Ensure subdirectories exist
+xyz_dir <- file.path(plots_dir, "Spatial_Scatters_XYZ")
+dir.create(xyz_dir, recursive = TRUE, showWarnings = FALSE)
+
+# =====================================================================
+# 2. LOAD MASTER DATA & METADATA
+# =====================================================================
+cat("Loading Master Regional Data...\n")
+master_rds_path <- file.path(metadata_dir, paste0(data_dir_name, "_Master_List_Filtered.rds"))
+master_regional_data <- readRDS(master_rds_path)
+final_summary <- master_regional_data$Final_Summary
+
+# Load Metadata to get Station Coordinates and Elevation
+meta_rds_path <- file.path(metadata_dir, paste0(data_dir_name, "_Master_Metadata.rds"))
+metadata_full <- readRDS(meta_rds_path) %>%
+  select(Station_ID, Longitude, Latitude, Elevation_m)
+
+# Define the statistics to analyze
+stats_of_interest <- c("p_zero", "l1_all", "l1_pos", "t2_pos", "t3_pos", "t4_pos")
+
+# Merge empirical statistics with spatial coordinates
+df_combined <- final_summary %>%
+  select(Station_ID, k_hours, all_of(stats_of_interest)) %>%
+  left_join(metadata_full, by = "Station_ID")
+
+# =====================================================================
+# 3. TASK 1: BOXPLOT STATISTICS EXPORT
+# =====================================================================
+cat("Calculating and Exporting Boxplot Statistics...\n")
+
+df_long_stats <- df_combined %>%
+  select(Station_ID, k_hours, all_of(stats_of_interest)) %>%
+  pivot_longer(cols = all_of(stats_of_interest), names_to = "Statistic", values_to = "Value") %>%
+  filter(!is.na(Value))
+
+boxplot_stats_df <- df_long_stats %>%
+  group_by(Statistic, k_hours) %>%
+  summarise(
+    Count = n(),
+    Min = min(Value, na.rm = TRUE),
+    Q1_25th = quantile(Value, 0.25, na.rm = TRUE),
+    Median = median(Value, na.rm = TRUE),
+    Mean = mean(Value, na.rm = TRUE),
+    Q3_75th = quantile(Value, 0.75, na.rm = TRUE),
+    Max = max(Value, na.rm = TRUE),
+    IQR = Q3_75th - Q1_25th,
+    .groups = "drop"
+  ) %>%
+  arrange(Statistic, k_hours)
+
+write_xlsx(boxplot_stats_df, file.path(plots_dir, "Empirical_Boxplot_Statistics.xlsx"))
+
+# =====================================================================
+# 4. TASK 2: GENERATE MAPS FOR ALL SCALES
+# =====================================================================
+cat("Preparing Spatial Data for Maps...\n")
+
+# Load shapefile
+shp_file <- list.files(maps_dir, pattern = "\\.shp$", full.names = TRUE)[1]
+if (is.na(shp_file)) {
+  warning("Shapefile not found! Skipping map generation.")
+} else {
+  germany_shp <- st_read(shp_file, quiet = TRUE) %>% 
+    st_transform(crs = 3857)
+  
+  # Convert data to sf object (Assuming original coords are EPSG:4326)
+  map_sf <- df_combined %>% filter(!is.na(Longitude) & !is.na(Latitude))
+  map_sf <- st_as_sf(map_sf, coords = c("Longitude", "Latitude"), crs = 4326) %>%
+    st_transform(crs = 3857)
+  
+  for (stat in stats_of_interest) {
+    cat("  Mapping:", stat, "...\n")
+    plot_sf <- map_sf %>% filter(!is.na(.data[[stat]]))
+    
+    p_map <- ggplot() +
+      geom_sf(data = germany_shp, fill = "whitesmoke", color = "darkgray", linewidth = 0.3) +
+      geom_sf(data = plot_sf, aes(color = .data[[stat]]), size = 1.2, alpha = 0.8) +
+      facet_wrap(~ k_hours, ncol = 5) +
+      scale_color_viridis_c(option = "turbo", name = stat) +
+      theme_void() + 
+      theme(
+        legend.position = "bottom",
+        legend.key.width = unit(2, "cm"),
+        strip.text = element_text(face = "bold", margin = margin(b = 5, t = 5)),
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 16, margin = margin(b = 10))
+      ) +
+      labs(title = paste("Spatial Distribution:", stat))
+    
+    ggsave(file.path(plots_dir, paste0("Map_", stat, ".png")), p_map, width = 16, height = 12, bg = "white")
+  }
+}
+
+# =====================================================================
+# 5. TASK 3: XYZ SCATTER PLOTS WITH REGRESSION (Plot + Excel)
+# =====================================================================
+cat("Generating XYZ Scatters and Calculating Regressions...\n")
+
+geo_vars <- list(
+  "Longitude"   = list(label = "X (Longitude)", color = "#1b9e77"),
+  "Latitude"    = list(label = "Y (Latitude)", color = "#d95f02"),
+  "Elevation_m" = list(label = "Z (Elevation, meters)", color = "#7570b3")
+)
+
+# List to store regression results for Excel export
+all_regressions <- list()
+
+for (stat in stats_of_interest) {
+  df_stat <- df_combined %>%
+    filter(!is.na(.data[[stat]])) %>%
+    mutate(Scale_Label = paste0(k_hours, "h")) %>%
+    mutate(Scale_Label = factor(Scale_Label, levels = paste0(sort(unique(k_hours)), "h")))
+  
+  for (geo_name in names(geo_vars)) {
+    geo_label <- geo_vars[[geo_name]]$label
+    geo_color <- geo_vars[[geo_name]]$color
+    
+    # 5A: Calculate Linear Models per Scale to overlay text & export to Excel
+    lm_results <- df_stat %>%
+      group_by(k_hours, Scale_Label) %>%
+      summarise(
+        n_stations = n(),
+        # Fit linear model safely
+        fit = list(lm(as.formula(paste(stat, "~", geo_name)), data = cur_data())),
+        .groups = "drop"
+      ) %>%
+      rowwise() %>%
+      mutate(
+        Intercept = coef(fit)[1],
+        Slope     = coef(fit)[2],
+        R_squared = summary(fit)$r.squared,
+        # Format the text equation for the plot: y = mx + c
+        sign_c    = ifelse(Intercept >= 0, "+", "-"),
+        eq_label  = sprintf("y = %.3fx %s %.3f\nR² = %.3f", Slope, sign_c, abs(Intercept), R_squared)
+      ) %>%
+      select(-fit, -sign_c) %>% # Clean up
+      mutate(Statistic = stat, Predictor = geo_name) 
+    
+    # Save to global list for Excel
+    all_regressions[[paste(stat, geo_name, sep="_")]] <- lm_results
+    
+    # 5B: Generate Plot
+    p_scatter <- ggplot(df_stat, aes(x = .data[[geo_name]], y = .data[[stat]])) +
+      geom_point(alpha = 0.4, size = 1.5, color = geo_color) +
+      geom_smooth(method = "lm", color = "black", linetype = "dashed", linewidth = 0.8, se = FALSE) +
+      
+      # Add the Equation and R2 text to the top-right of each facet
+      geom_text(data = lm_results, aes(x = Inf, y = Inf, label = eq_label), 
+                hjust = 1.05, vjust = 1.2, size = 3.5, fontface = "bold", color = "black") +
+      
+      facet_wrap(~ Scale_Label, scales = "free_y", ncol = 5) +
+      labs(
+        title = paste("Relationship:", stat, "vs", geo_label),
+        x = geo_label,
+        y = stat
+      ) +
+      theme_bw() +
+      theme(
+        strip.background = element_rect(fill = "whitesmoke"),
+        strip.text = element_text(face = "bold"),
+        plot.title = element_text(face = "bold", hjust = 0.5, size = 14)
+      )
+    
+    out_name <- paste0("Scatter_", stat, "_vs_", geo_name, ".png")
+    ggsave(file.path(xyz_dir, out_name), p_scatter, width = 16, height = 12, bg = "white")
+  }
+}
+
+# 5C: Combine all regression summaries and export to Excel
+regression_master_df <- bind_rows(all_regressions) %>%
+  select(Statistic, Predictor, k_hours, n_stations, Slope, Intercept, R_squared, eq_label) %>%
+  arrange(Statistic, Predictor, k_hours)
+
+write_xlsx(regression_master_df, file.path(xyz_dir, "XYZ_Regression_Statistics.xlsx"))
+
+cat("\n--- ALL TASKS COMPLETE ---\n")
+cat("- Boxplot Data saved to:", plots_dir, "\n")
+cat("- Maps saved to:", plots_dir, "\n")
+cat("- Scatters and Regression Data saved to:", xyz_dir, "\n")
+```
+
+
+
+
+
+
+
+
