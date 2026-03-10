@@ -201,12 +201,12 @@ cat(" - High-Quality Stations (Passed criteria):", nrow(quality_stations), "\n\n
 # =====================================================================
 # 3. INITIALIZE LISTS FOR COMBINING
 # =====================================================================
-# We will collect the dataframes from all stations into these lists
 list_final_summary   <- list()
 list_opt_params      <- list()
 list_eval_models     <- list()
 list_best_models     <- list()
 list_all_predictions <- list()
+list_scale_data_loss <- list() # NEW: Initialize list for extra metadata
 
 cat("Merging RDS results for valid stations...\n")
 
@@ -215,7 +215,6 @@ cat("Merging RDS results for valid stations...\n")
 # =====================================================================
 for (i in seq_len(nrow(quality_stations))) {
  
- # Assuming your folder names match the Station_ID (e.g., "DE_00003")
  st_id <- quality_stations$Station_ID[i]
  st_folder <- file.path(results_dir, st_id)
  
@@ -225,10 +224,9 @@ for (i in seq_len(nrow(quality_stations))) {
  file_eval_models <- file.path(st_folder, "final_evaluated_models.rds")
  file_best_models <- file.path(st_folder, "best_models.rds")
  file_predictions <- file.path(st_folder, "all_predictions.rds")
+ file_extra_meta  <- file.path(st_folder, "extra_metadata.rds") # NEW: Path to extra metadata
  
  # Safely read and append each file if it exists
- # We use mutate(Station_ID = st_id) so you can track the data after merging!
- 
  if (file.exists(file_summary)) {
   list_final_summary[[st_id]] <- readRDS(file_summary) %>% mutate(Station_ID = st_id)
  }
@@ -248,14 +246,23 @@ for (i in seq_len(nrow(quality_stations))) {
  if (file.exists(file_predictions)) {
   list_all_predictions[[st_id]] <- readRDS(file_predictions) %>% mutate(Station_ID = st_id)
  }
+ 
+ # NEW: Safely read the complex list object and extract the dataframe
+ if (file.exists(file_extra_meta)) {
+  st_extra_meta_obj <- readRDS(file_extra_meta)
+  if (!is.null(st_extra_meta_obj$Scale_Data_Loss)) {
+   list_scale_data_loss[[st_id]] <- st_extra_meta_obj$Scale_Data_Loss %>% 
+    mutate(Station_ID = st_id)
+  }
+ }
 }
 
 # =====================================================================
 # 5. BIND ROWS AND CREATE MASTER OBJECT
 # =====================================================================
-# bind_rows combines the hundreds of tiny dataframes into massive regional dataframes
 master_regional_data <- list(
- Quality_Metadata         = quality_stations, # Keeps the metadata of only the stations used
+ Quality_Metadata         = quality_stations, 
+ Scale_Data_Loss          = bind_rows(list_scale_data_loss), # NEW: Bind extra metadata
  Final_Summary            = bind_rows(list_final_summary),
  Optimized_Parameters     = bind_rows(list_opt_params),
  Final_Evaluated_Models   = bind_rows(list_eval_models),
@@ -266,7 +273,6 @@ master_regional_data <- list(
 # =====================================================================
 # 6. EXPORT MASTER RDS
 # =====================================================================
-# Name it exactly as the data_dir_name (e.g., "QC_d data - Germany.rds")
 export_master_path <- file.path(metadata_dir, paste0(data_dir_name, "_Master_List_Filtered" ,".rds"))
 
 saveRDS(master_regional_data, export_master_path)
@@ -277,6 +283,7 @@ cat("Saved to:", export_master_path, "\n\n")
 
 # Print a quick preview of the resulting sizes
 cat("Master Object Contents:\n")
+cat(" - Scale_Data_Loss Rows:        ", nrow(master_regional_data$Scale_Data_Loss), "\n") # NEW
 cat(" - Final_Summary Rows:          ", nrow(master_regional_data$Final_Summary), "\n")
 cat(" - Optimized_Parameters Rows:   ", nrow(master_regional_data$Optimized_Parameters), "\n")
 cat(" - Best_Models Rows:            ", nrow(master_regional_data$Best_Models), "\n")
