@@ -9,6 +9,11 @@ library(DEoptim)
 library(tidyr)
 ```
 
+
+
+
+
+
 ```{r}
 # =====================================================================
 # 1. DEFINE PATHS & DIRECTORIES
@@ -32,6 +37,25 @@ master_rds_path <- file.path(metadata_dir, paste0(data_dir_name, "_Master_List_F
 cat("Loading Master Regional Data...\n")
 master_regional_data <- readRDS(master_rds_path)
 ```
+
+
+
+```{r}
+t2_val<-master_regional_data$Final_Summary%>%filter(Station_ID=="DE_00020")
+k_seq<-t2_val$k_hours
+t2_val<-t2_val$t2_pos
+l1<-master_regional_data$Final_Summary%>%filter(Station_ID=="DE_00020")
+l1<-l1$l1_pos
+l2<-master_regional_data$Final_Summary%>%filter(Station_ID=="DE_00020")
+l2<-l2$l2_pos
+```
+
+
+```{r}
+plot(l1)+plot(l2)
+```
+
+
 ```{r}
 library(DEoptim)
 library(ggplot2)
@@ -135,106 +159,103 @@ ggplot() +
 
 
 
+
+
 ```{r}
-# 1. Load Necessary Libraries
+# Load required libraries
 library(DEoptim)
-library(VGAM)
-library(dplyr)
 library(ggplot2)
+library(dplyr)
 
-# ---------------------------------------------------------
-# 2. Define the Gamma-Type Model
-# ---------------------------------------------------------
-# f(k) = cc + W * (k^gamma) * exp(-lambda * k)
-gamma_model <- function(k, gamma, lambda, W, cc) {
-  return(cc + W * (k^gamma) * exp(-lambda * k))
+# =========================================================================
+# 1. Define the Stretched Surge Model (Kohlrausch)
+# =========================================================================
+stretched_surge_model <- function(k, c, A, alpha, beta, gamma) {
+  return(c + A * (k^alpha) * exp(-(beta * k)^gamma))
 }
 
-# ---------------------------------------------------------
-# 3. Data Preparation
-# ---------------------------------------------------------
-# Assuming t2_val and k_seq are already defined in your environment.
-# We bundle them to ensure 1-to-1 alignment.
-full_df <- data.frame(k = k_seq, observed = t2_val) %>%
-  mutate(region = ifelse(k >= 24, "Training (Tail)", "Validation (Head)"))
-
-# Separate training data for the optimizer
-train_df <- full_df %>% filter(region == "Training (Tail)")
-k_train <- train_df$k
-t2_train <- train_df$observed
-
-# ---------------------------------------------------------
-# 4. Objective Function with Peak POSITION and HEIGHT constraints
-# ---------------------------------------------------------
-obj_func_refined <- function(params) {
-  g  <- params[1] # Growth exponent (gamma)
-  l  <- params[2] # Decay rate (lambda)
-  W  <- params[3] # Scaling weight
-  cc <- params[4] # Asymptotic floor
+# =========================================================================
+# 2. Define the Objective Function
+# =========================================================================
+obj_stretched <- function(p) {
+  # p = c(c, A, alpha, beta, gamma)
+  t2_est <- stretched_surge_model(k_seq, p[1], p[2], p[3], p[4], p[5])
   
-  # Predict tail values (The Training Region)
-  preds <- gamma_model(k_train, g, l, W, cc)
+  # Calculate Mean Absolute Percentage Error (MAPE)
+  err_t2 <- mean(abs((t2_val - t2_est) / t2_val))
   
-  # SSE for the tail
-  # We multiply by 10 to make the tail fit higher priority than the penalties
-  sse_tail <- 10 * sum((t2_train - preds)^2, na.rm = TRUE)
+  # Optional: Add a slight penalty to keep gamma within physically realistic bounds 
+  # (though DEoptim bounds usually handle this, a soft penalty helps stability)
+  penalty <- ifelse(p[5] <= 0, 1e6, 0)
   
-  # --- CONSTRAINTS FOR VALIDATION (The Hump) ---
-  # Peak Position: Peak of k^g * exp(-l*k) is at k = g/l
-  theoretical_peak_k <- g / l
-  peak_pos_penalty <- 100 * (theoretical_peak_k - 5)^2
-  
-  # Peak Height: Target Value based on your orange points (~0.62)
-  peak_height <- gamma_model(theoretical_peak_k, g, l, W, cc)
-  peak_height_penalty <- 1000 * (peak_height - 0.623)^2
-  
-  # Return total loss to be minimized
-  return(sse_tail + peak_pos_penalty + peak_height_penalty)
+  return(err_t2 + penalty)
 }
 
-# ---------------------------------------------------------
-# 5. Run the Optimization
-# ---------------------------------------------------------
-# Bounds: alpha [0.01, 3], lambda [0.001, 1], W [0.001, 2], cc [0.1, 0.6]
-lower_bounds <- c(0.01, 0.0001, 0.001, 0.10)
-upper_bounds <- c(3.0,  1.0,    2.0,   0.60)
-
+# =========================================================================
+# 3. Optimization Setup
+# =========================================================================
 set.seed(42)
-fit_final <- DEoptim(fn = obj_func_refined, 
-                      lower = lower_bounds, 
-                      upper = upper_bounds, 
-                      control = DEoptim.control(itermax = 1000, trace = 100))
 
-# ---------------------------------------------------------
-# 6. Extraction & Full Visualization
-# ---------------------------------------------------------
-res <- fit_final$optim$bestmem
-g_opt <- res[1]; l_opt <- res[2]; W_opt <- res[3]; cc_opt <- res[4]
+# Bounds for p = c(c, A, alpha, beta, gamma)
+# gamma (p[5]): allow anything from 0.1 (very stretched) to 3.0 (very compressed)
+lower_bounds <- c(0.2, 0.001, 0.01, 0.001, 0.1)
+upper_bounds <- c(0.8, 10,    5,    1,     3.0)
 
-# Generate a smooth prediction line across the whole range
-k_all_seq <- seq(0.1, max(k_seq), length.out = 600)
-df_line <- data.frame(k = k_all_seq) %>%
-  mutate(predicted = gamma_model(k, g_opt, l_opt, W_opt, cc_opt))
+# Run Optimizer
+fit_stretched <- DEoptim(obj_stretched, 
+                         lower = lower_bounds, 
+                         upper = upper_bounds, 
+                         control = list(itermax = 1500, trace = FALSE))
 
-# Calculate where the peak actually ended up
-final_peak_k <- g_opt / l_opt
-final_peak_y <- gamma_model(final_peak_k, g_opt, l_opt, W_opt, cc_opt)
+# =========================================================================
+# 4. Extract and Print Results
+# =========================================================================
+opt_p <- fit_stretched$optim$bestmem
+cat("\n=== Stretched Surge Model Parameters ===\n")
+cat(sprintf("Baseline (c): %.4f\n", opt_p[1]))
+cat(sprintf("Scale (A): %.4f\n", opt_p[2]))
+cat(sprintf("Power Rise (alpha): %.4f\n", opt_p[3]))
+cat(sprintf("Exp Decay (beta): %.4f\n", opt_p[4]))
+cat(sprintf("Shape Parameter (gamma): %.4f\n", opt_p[5]))
+
+if (opt_p[5] > 1) {
+  cat("Result: gamma > 1 (Compressed exponential: sharper drop-off)\n")
+} else if (opt_p[5] < 1) {
+  cat("Result: gamma < 1 (Stretched exponential: longer, dragging tail)\n")
+}
+
+# =========================================================================
+# 5. Visualization
+# =========================================================================
+k_smooth <- exp(seq(log(min(k_seq)), log(max(k_seq)), length.out = 500))
+t2_pred_smooth <- stretched_surge_model(k_smooth, opt_p[1], opt_p[2], opt_p[3], opt_p[4], opt_p[5])
+
+df_pred <- data.frame(k = k_smooth, t2 = t2_pred_smooth)
+df_orig <- data.frame(k = k_seq, t2 = t2_val) %>%
+  mutate(Scale = ifelse(k >= 24, "Tail (>= 24h)", "Head (< 24h)"))
 
 ggplot() +
-  # The optimized model curve
-  geom_line(data = df_line, aes(x = k, y = predicted), color = "darkblue", linewidth = 1.2) +
-  # Original data points
-  geom_point(data = full_df, aes(x = k, y = observed, color = region), size = 3) +
-  # Annotate the training boundary
-  geom_vline(xintercept = 24, linetype = "dashed", alpha = 0.5) +
-  coord_cartesian(ylim = c(0.35, 0.7)) + 
-  scale_color_manual(values = c("Training (Tail)" = "#F8766D", "Validation (Head)" = "#00BFC4")) +
-  labs(title = "Refined Double-Constrained Gamma Model",
-       subtitle = paste("Peak K:", round(final_peak_k, 2), 
-                        "| Peak Height:", round(final_peak_y, 3), 
-                        "| Floor C:", round(cc_opt, 3)),
-       x = "Threshold (k)", y = "L-CV (t2)") +
+  geom_line(data = df_pred, aes(x = k, y = t2), color = "#27ae60", linewidth = 1.2) +
+  geom_point(data = df_orig, aes(x = k, y = t2, fill = Scale), size = 3, shape = 21, color="black") +
+  scale_x_log10() +
+  scale_fill_manual(values = c("Head (< 24h)" = "#f39c12", "Tail (>= 24h)" = "#2c3e50")) +
+  labs(title = "Stretched Surge Model Fit (Kohlrausch)",
+       subtitle = sprintf("gamma = %.3f | beta = %.4f", opt_p[5], opt_p[4]),
+       x = "Temporal scale, k [h] (Log Scale)", 
+       y = expression(t[2])) +
   theme_minimal()
 ```
+
+
+```{r}
+df<-master_regional_data$Final_Summary%>%filter(k_hours==1)
+```
+
+
+
+
+
+
+
 
 
