@@ -32,41 +32,209 @@ master_rds_path <- file.path(metadata_dir, paste0(data_dir_name, "_Master_List_F
 cat("Loading Master Regional Data...\n")
 master_regional_data <- readRDS(master_rds_path)
 ```
-
-
 ```{r}
-df<-master_regional_data$Final_Summary
+library(DEoptim)
+library(ggplot2)
+library(dplyr)
 
-#df<-df %>% filter(Station_ID=="DE_00020")
-df<-df[,-c(1)]
+# 1. Define the Ratio of Power Laws Function
+# f(k) = c + W * [ (k + d1)^-a / (k + d2)^-b ]
+ratio_power_model <- function(k, alpha, beta, d1, d2, W, cc) {
+  num <- (k + d1)^-alpha
+  den <- (k + d2)^-beta
+  return(cc + W * (num / den))
+}
 
-df<-df%>%pivot_longer(cols = !c(k_hours,Station_ID),names_to = "Stat",values_to = "Val")
+# 2. Filter data for k >= 24
+# Assuming t2_val and k_seq are already aligned in your environment
+df_tail <- data.frame(k = k_seq, t2 = t2_val) %>%
+  filter(k >= 24)
 
+k_train <- df_tail$k
+t2_train <- df_tail$t2
 
-ggplot(subset(df, Stat %in% c("p_zero")), 
-       aes(x = k_hours, y = Val, colour = Station_ID)) +
-  geom_line()+theme(legend.position = "none")+scale_x_log10()
+# 3. Objective Function
+obj_func_tail <- function(params) {
+  a   <- params[1]
+  b   <- params[2]
+  d1  <- params[3]
+  d2  <- params[4]
+  W   <- params[5]
+  cc  <- params[6]
+  
+  preds <- ratio_power_model(k_train, a, b, d1, d2, W, cc)
+  
+  # Minimize SSE
+  return(sum((t2_train - preds)^2, na.rm = TRUE))
+}
 
+# 4. Optimization for the Tail
+# We narrow the search for 'c' around your tail values (0.4 - 0.5)
+set.seed(123)
+fit_tail <- DEoptim(fn = obj_func_tail, 
+                    lower = c(0.1, 0.1, 0.0, 0.0, 0.01, 0.35), 
+                    upper = c(5.0, 5.0, 10.0, 10.0, 5.0, 0.50), 
+                    control = DEoptim.control(itermax = 300, trace = 50))
 
+# 5. Extraction
+res_t <- fit_tail$optim$bestmem
+a_t <- res_t[1]; b_t <- res_t[2]
+d1_t <- res_t[3]; d2_t <- res_t[4]
+W_t <- res_t[5]; c_t <- res_t[6]
 
+# 6. Visualization
+k_smooth <- seq(24, 240, length.out = 200)
+df_line <- data.frame(k = k_smooth) %>%
+  mutate(y = ratio_power_model(k, a_t, b_t, d1_t, d2_t, W_t, c_t))
 
-
+ggplot() +
+  geom_point(data = df_tail, aes(x = k, y = t2), size = 3, color = "black") +
+  geom_line(data = df_line, aes(x = k, y = y), color = "red", linewidth = 1.2) +
+  labs(title = "Tail Fit (k >= 24): Ratio of Power Laws",
+       subtitle = paste("Alpha:", round(a_t, 2), "| Beta:", round(b_t, 2), "| Limit C:", round(c_t, 4)),
+       x = "Threshold (k)", y = "L-CV (t2)") 
 ```
 
 ```{r}
-df_plot <- df %>%
-  filter(Stat == "t2_pos") %>% 
-  mutate(k_hours = as.factor(k_hours))
+# 1. Use the BEST parameters from your previous fit_tail optimization
+# (Ensure these variables are in your environment from the previous step)
+a_opt  <- res_t[1]
+b_opt  <- res_t[2]
+d1_opt <- res_t[3]
+d2_opt <- res_t[4]
+W_opt  <- res_t[5]
+c_opt  <- res_t[6]
 
-# 3. Create the boxplot
-ggplot(df_plot, aes(x = k_hours, y = Val, fill = k_hours)) +
-  geom_boxplot() +
-  labs(title = "Distribution of Mean Values by k_hours",
-       x = "k_hours (Time Window)",
-       y = "Value") +
-  theme_minimal() +
-  theme(legend.position = "none")
+# 2. Generate predictions for ALL k (1 to 240)
+k_all_seq <- seq(1, 240, length.out = 500)
+df_validation <- data.frame(k = k_all_seq) %>%
+  mutate(predicted = ratio_power_model(k, a_opt, b_opt, d1_opt, d2_opt, W_opt, c_opt))
+
+# 3. Create a combined data frame for the original points
+# Assuming t2_val and k_seq are your original full vectors
+df_original <- data.frame(k = k_seq, observed = t2_val) %>%
+  mutate(region = ifelse(k >= 24, "Training (Tail)", "Validation (Head)"))
+
+# 4. Plot the results
+ggplot() +
+  # The Full Prediction Line
+  geom_line(data = df_validation, aes(x = k, y = predicted), 
+            color = "darkred", linewidth = 1.2, alpha = 0.8) +
+  # The Data Points (Colored by region)
+  geom_point(data = df_original, aes(x = k, y = observed, color = region), size = 3) +
+  # Vertical line at the training threshold
+  geom_vline(xintercept = 24, linetype = "dashed", color = "grey40") +
+  scale_color_manual(values = c("Training (Tail)" = "black", "Validation (Head)" = "orange")) +
+  labs(title = "Model Validation: Tail-Optimized Parameters on All Data",
+       subtitle = "Does the tail-fit predict the low-k hump?",
+       x = "Threshold (k)", y = "L-CV (t2)",
+       color = "Data Region") +
+  theme_minimal()
 ```
 
+
+
+
+```{r}
+# 1. Load Necessary Libraries
+library(DEoptim)
+library(VGAM)
+library(dplyr)
+library(ggplot2)
+
+# ---------------------------------------------------------
+# 2. Define the Gamma-Type Model
+# ---------------------------------------------------------
+# f(k) = cc + W * (k^gamma) * exp(-lambda * k)
+gamma_model <- function(k, gamma, lambda, W, cc) {
+  return(cc + W * (k^gamma) * exp(-lambda * k))
+}
+
+# ---------------------------------------------------------
+# 3. Data Preparation
+# ---------------------------------------------------------
+# Assuming t2_val and k_seq are already defined in your environment.
+# We bundle them to ensure 1-to-1 alignment.
+full_df <- data.frame(k = k_seq, observed = t2_val) %>%
+  mutate(region = ifelse(k >= 24, "Training (Tail)", "Validation (Head)"))
+
+# Separate training data for the optimizer
+train_df <- full_df %>% filter(region == "Training (Tail)")
+k_train <- train_df$k
+t2_train <- train_df$observed
+
+# ---------------------------------------------------------
+# 4. Objective Function with Peak POSITION and HEIGHT constraints
+# ---------------------------------------------------------
+obj_func_refined <- function(params) {
+  g  <- params[1] # Growth exponent (gamma)
+  l  <- params[2] # Decay rate (lambda)
+  W  <- params[3] # Scaling weight
+  cc <- params[4] # Asymptotic floor
+  
+  # Predict tail values (The Training Region)
+  preds <- gamma_model(k_train, g, l, W, cc)
+  
+  # SSE for the tail
+  # We multiply by 10 to make the tail fit higher priority than the penalties
+  sse_tail <- 10 * sum((t2_train - preds)^2, na.rm = TRUE)
+  
+  # --- CONSTRAINTS FOR VALIDATION (The Hump) ---
+  # Peak Position: Peak of k^g * exp(-l*k) is at k = g/l
+  theoretical_peak_k <- g / l
+  peak_pos_penalty <- 100 * (theoretical_peak_k - 5)^2
+  
+  # Peak Height: Target Value based on your orange points (~0.62)
+  peak_height <- gamma_model(theoretical_peak_k, g, l, W, cc)
+  peak_height_penalty <- 1000 * (peak_height - 0.623)^2
+  
+  # Return total loss to be minimized
+  return(sse_tail + peak_pos_penalty + peak_height_penalty)
+}
+
+# ---------------------------------------------------------
+# 5. Run the Optimization
+# ---------------------------------------------------------
+# Bounds: alpha [0.01, 3], lambda [0.001, 1], W [0.001, 2], cc [0.1, 0.6]
+lower_bounds <- c(0.01, 0.0001, 0.001, 0.10)
+upper_bounds <- c(3.0,  1.0,    2.0,   0.60)
+
+set.seed(42)
+fit_final <- DEoptim(fn = obj_func_refined, 
+                      lower = lower_bounds, 
+                      upper = upper_bounds, 
+                      control = DEoptim.control(itermax = 1000, trace = 100))
+
+# ---------------------------------------------------------
+# 6. Extraction & Full Visualization
+# ---------------------------------------------------------
+res <- fit_final$optim$bestmem
+g_opt <- res[1]; l_opt <- res[2]; W_opt <- res[3]; cc_opt <- res[4]
+
+# Generate a smooth prediction line across the whole range
+k_all_seq <- seq(0.1, max(k_seq), length.out = 600)
+df_line <- data.frame(k = k_all_seq) %>%
+  mutate(predicted = gamma_model(k, g_opt, l_opt, W_opt, cc_opt))
+
+# Calculate where the peak actually ended up
+final_peak_k <- g_opt / l_opt
+final_peak_y <- gamma_model(final_peak_k, g_opt, l_opt, W_opt, cc_opt)
+
+ggplot() +
+  # The optimized model curve
+  geom_line(data = df_line, aes(x = k, y = predicted), color = "darkblue", linewidth = 1.2) +
+  # Original data points
+  geom_point(data = full_df, aes(x = k, y = observed, color = region), size = 3) +
+  # Annotate the training boundary
+  geom_vline(xintercept = 24, linetype = "dashed", alpha = 0.5) +
+  coord_cartesian(ylim = c(0.35, 0.7)) + 
+  scale_color_manual(values = c("Training (Tail)" = "#F8766D", "Validation (Head)" = "#00BFC4")) +
+  labs(title = "Refined Double-Constrained Gamma Model",
+       subtitle = paste("Peak K:", round(final_peak_k, 2), 
+                        "| Peak Height:", round(final_peak_y, 3), 
+                        "| Floor C:", round(cc_opt, 3)),
+       x = "Threshold (k)", y = "L-CV (t2)") +
+  theme_minimal()
+```
 
 
