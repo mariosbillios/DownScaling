@@ -126,27 +126,33 @@ validation_df$t4_diff <- t4_all - t4_calc
 ```
 
 
+
 ```{r}
-# Filter out any exact zeros just in case, to avoid log(0)
-decay_data <- stn_data %>% filter(t3_all > 0, k_hours >= 1)
+# Load the necessary libraries
+library(ggplot2)
+library(tidyr)
+library(dplyr)
 
-# Fit a linear model to the log-log data
-# We expect the slope to be negative (decaying)
-tau3_model <- lm(log(t3_all) ~ log(k_hours), data = decay_data)
+# 1. Select the relevant columns and reshape the data to "long" format
+stn_data_long <- stn_data %>%
+  select(k_hours, p_zero, t2_pos, t3_pos, t4_pos, t2_all, t3_all, t4_all) %>%
+  pivot_longer(
+    cols = -k_hours,        # Keep k_hours as the X-axis reference
+    names_to = "Variable",  # The new column containing your variable names
+    values_to = "Value"     # The new column containing the actual numbers
+  )
 
-# Print the slope (this is your empirical decay rate)
-summary(tau3_model)
-
-# Visualize the straight-line power-law decay
-ggplot(decay_data, aes(x = log(k_hours), y = log(t3_all))) +
-  geom_point(size = 3) +
-  geom_smooth(method = "lm", color = "red", se = FALSE) +
-  labs(title = "Proof 2: Power-Law Decay of L-Skewness",
-       x = "log(Aggregation Scale k)",
-       y = "log(tau_3)") +
-  theme_minimal()
+# 2. Plot the data
+ggplot(stn_data_long, aes(x = k_hours, y = Value, color = Variable)) +
+  geom_line(linewidth = 1) +
+  theme_minimal() +
+  labs(
+    title = "Metrics for Station DE_00020",
+    x = "Hours (k_seq)",
+    y = "Value",
+    color = "Metric"
+  )
 ```
-
 
 
 
