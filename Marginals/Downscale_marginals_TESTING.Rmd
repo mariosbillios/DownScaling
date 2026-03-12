@@ -51,9 +51,6 @@ l2<-l2$l2_pos
 ```
 
 
-```{r}
-plot(l1)+plot(l2)
-```
 
 
 ```{r}
@@ -247,14 +244,205 @@ ggplot() +
 ```
 
 
+
+
+
+
+
 ```{r}
-df<-master_regional_data$Final_Summary%>%filter(k_hours==1)
+# Load required libraries
+library(DEoptim)
+library(ggplot2)
+library(dplyr)
+
+
+# =========================================================================
+# 1. SETUP TRAIN & TEST STATIONS
+# =========================================================================
+all_stations <- unique(master_regional_data$Final_Summary$Station_ID)
+
+# Randomly pick 5 stations for training
+train_stations <- sample(all_stations, 100)
+
+# Pick 1 test station (not in training set)
+test_station <- sample(setdiff(all_stations, train_stations), 1)
+
+cat("Training Stations:", paste(train_stations, collapse = ", "), "\n")
+cat("Test Station:", test_station, "\n\n")
+
+# =========================================================================
+# 2. TRAINING PHASE: BUILD params_df & FIND THE REGIONAL RATIO
+# =========================================================================
+surge_4param <- function(k, A, alpha, beta, gamma) {
+  return(A * (k^alpha) * exp(-(beta * k)^gamma))
+}
+
+# Initialize an empty list to store the dataframes for each station
+results_list <- list()
+
+for (i in seq_along(train_stations)) {
+  stn <- train_stations[i]
+  stn_data <- master_regional_data$Final_Summary %>% filter(Station_ID == stn)
+  
+  obj_train <- function(p) {
+    est <- surge_4param(stn_data$k_hours, p[1], p[2], p[3], p[4])
+    return(mean(abs((stn_data$t2_pos - est) / stn_data$t2_pos))) # MAPE
+  }
+  
+  # Fit full 4-parameter model
+  fit <- suppressWarnings(DEoptim(obj_train, lower = c(0.1, 0.01, 0.001, 0.1), 
+                                  upper = c(10, 5, 1, 3), 
+                                  control = list(itermax = 400, trace = FALSE)))
+  
+  opt_p <- fit$optim$bestmem
+  
+  # Store the results for this specific station in a dataframe
+  results_list[[i]] <- data.frame(
+    Station_ID = stn,
+    A_param = opt_p[1],
+    alpha_param = opt_p[2],
+    beta_param = opt_p[3],
+    gamma_param = opt_p[4],
+    Ratio_A_alpha = opt_p[1] / opt_p[2], # Calculate ratio directly here
+    MAPE = fit$optim$bestval
+  )
+}
+
+# Combine the list of dataframes into a single params_df
+params_df <- bind_rows(results_list)
+
+# Calculate the mean ratio from the dataframe
+R_mean <- mean(params_df$Ratio_A_alpha)
+
+cat(sprintf("=== Regional Parameter Link ===\nMean Ratio (A / alpha) = %.4f\n\n", R_mean))
+
+# View the first few rows of your new dataframe
+head(params_df)
+
+# =========================================================================
+# 3. TESTING PHASE: FIT TAIL OF UNSEEN STATION USING LINKED MODEL
+# =========================================================================
+test_data <- master_regional_data$Final_Summary %>% filter(Station_ID == test_station)
+tail_data <- test_data %>% filter(k_hours >= 24)
+
+# 3-Parameter Linked Model (A is calculated dynamically as R_mean * alpha)
+surge_linked <- function(k, alpha, beta, gamma) {
+  linked_A <- R_mean * alpha
+  return(linked_A * (k^alpha) * exp(-(beta * k)^gamma))
+}
+
+obj_test_tail <- function(p) {
+  # p = c(alpha, beta, gamma)
+  est <- surge_linked(tail_data$k_hours, p[1], p[2], p[3])
+  return(mean(abs((tail_data$t2_pos - est) / tail_data$t2_pos)))
+}
+
+# Fit ONLY to the tail of the test station
+fit_test <- suppressWarnings(DEoptim(obj_test_tail, lower = c(0.01, 0.001, 0.1), upper = c(5, 1, 3), 
+                                     control = list(itermax = 500, trace = FALSE)))
+
+opt_p <- fit_test$optim$bestmem
+predicted_A <- R_mean * opt_p[1]
+
+cat("=== Test Station Parameters (Fitted on Tail Only) ===\n")
+cat(sprintf("alpha (Fitted): %.4f\n", opt_p[1]))
+cat(sprintf("A (Predicted via Ratio): %.4f\n", predicted_A))
+cat(sprintf("beta (Fitted): %.4f\n", opt_p[2]))
+cat(sprintf("gamma (Fitted): %.4f\n", opt_p[3]))
+
+# =========================================================================
+# 4. EXTRAPOLATE AND VISUALIZE
+# =========================================================================
+k_smooth <- exp(seq(log(min(test_data$k_hours)), log(max(test_data$k_hours)), length.out = 500))
+t2_pred_smooth <- surge_linked(k_smooth, opt_p[1], opt_p[2], opt_p[3])
+
+df_pred <- data.frame(k = k_smooth, t2 = t2_pred_smooth)
+df_orig <- test_data %>%
+  mutate(Scale = ifelse(k_hours >= 24, "Tail (>= 24h) [Fitted]", "Head (< 24h) [Hidden/Extrapolated]"))
+
+ggplot() +
+  geom_line(data = df_pred, aes(x = k, y = t2), color = "#d35400", linewidth = 1.2) +
+  geom_point(data = df_orig, aes(x = k_hours, y = t2_pos, fill = Scale), size = 3, shape = 21, color="black") +
+  scale_x_log10() +
+  scale_fill_manual(values = c("Head (< 24h) [Hidden/Extrapolated]" = "orange", "Tail (>= 24h) [Fitted]" = "midnightblue")) +
+  labs(title = sprintf("Ratio Cross-Validation: Station %s", test_station),
+       subtitle = sprintf("Trained entirely on tail data | Linked Ratio A/alpha = %.2f", R_mean),
+       x = "Temporal scale, k [h] (Log Scale)", 
+       y = expression(t[2])) +
+  theme_minimal()
+
+
+
 ```
 
 
+```{r}
+# Load required libraries
+library(ggplot2)
+library(dplyr)
+library(patchwork) # For arranging multiple plots easily
 
+# =========================================================================
+# 1. MERGE DATA AND CALCULATE THE RATIO
+# =========================================================================
+# We take the parameters you already optimized and join them with the metadata
+analysis_df <- params_df %>%
+  left_join(master_regional_data[["Quality_Metadata"]], by = "Station_ID") %>%
+  # Calculate our target ratio
+  mutate(Ratio_A_alpha = A_param / alpha_param)
 
+# Check to ensure merge was successful and drop NAs if any metadata is missing
+analysis_df <- analysis_df %>% filter(!is.na(Ratio_A_alpha), !is.na(Elevation_m))
 
+# =========================================================================
+# 2. GENERATE SCATTER PLOTS (X, Y, Z)
+# =========================================================================
+# Plot 1: Ratio vs Longitude (X)
+p_x <- ggplot(analysis_df, aes(x = Longitude, y = Ratio_A_alpha)) +
+  geom_point(color = "#3498db", size = 3, alpha = 0.7) +
+  geom_smooth(method = "lm", color = "black", linetype = "dashed") +
+  labs(title = "Ratio vs. Longitude (X)", 
+       x = "Longitude", 
+       y = expression(Ratio~(A/alpha))) +
+  theme_bw()
+
+# Plot 2: Ratio vs Latitude (Y)
+p_y <- ggplot(analysis_df, aes(x = Latitude, y = Ratio_A_alpha)) +
+  geom_point(color = "#2ecc71", size = 3, alpha = 0.7) +
+  geom_smooth(method = "lm", color = "black", linetype = "dashed") +
+  labs(title = "Ratio vs. Latitude (Y)", 
+       x = "Latitude", 
+       y = expression(Ratio~(A/alpha))) +
+  theme_bw()
+
+# Plot 3: Ratio vs Elevation (Z)
+p_z <- ggplot(analysis_df, aes(x = Elevation_m, y = Ratio_A_alpha)) +
+  geom_point(color = "#e67e22", size = 3, alpha = 0.7) +
+  geom_smooth(method = "lm", color = "black", linetype = "dashed") +
+  labs(title = "Ratio vs. Elevation (Z)", 
+       x = "Elevation (m)", 
+       y = expression(Ratio~(A/alpha))) +
+  theme_bw()
+
+# =========================================================================
+# 3. GENERATE SPATIAL MAP (X vs Y colored by Ratio)
+# =========================================================================
+p_map <- ggplot(analysis_df, aes(x = Longitude, y = Latitude, color = Ratio_A_alpha)) +
+  geom_point(size = 5, alpha = 0.9) +
+  scale_color_viridis_c(option = "plasma", name = "A / alpha") +
+  labs(title = "Spatial Distribution of the Ratio", 
+       subtitle = "Looking for geographic clustering",
+       x = "Longitude", 
+       y = "Latitude") +
+  theme_minimal() +
+  theme(legend.position = "right")
+
+# =========================================================================
+# 4. DISPLAY ALL PLOTS TOGETHER
+# =========================================================================
+# The patchwork package makes this syntax beautifully simple
+(p_x | p_y | p_z) / p_map
+```
 
 
 
