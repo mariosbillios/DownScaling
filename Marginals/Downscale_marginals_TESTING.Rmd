@@ -41,112 +41,111 @@ master_regional_data <- readRDS(master_rds_path)
 
 
 ```{r}
-t_val<-master_regional_data$Final_Summary%>%filter(Station_ID=="DE_00020")
-k_seq<-t_val$k_hours
-t2l<-t_val$t2_pos
 
+# Filter the data once for the station
+stn_data <- master_regional_data$Final_Summary %>% 
+  filter(Station_ID == "DE_00020")
+
+# Extract the needed vectors
+k_seq  <- stn_data$k_hours
+p_zero <- stn_data$p_zero
+
+t2_pos <- stn_data$t2_pos
+t3_pos <- stn_data$t3_pos
+t4_pos <- stn_data$t4_pos
+
+t2_all <- stn_data$t2_all
+t3_all <- stn_data$t3_all
+t4_all <- stn_data$t4_all
+
+
+# Function for L-variation (tau_2) of the whole process
+calc_t2_all <- function(p0, t2_pos) {
+  p1 <- 1 - p0
   
-t3<-master_regional_data$Final_Summary%>%filter(Station_ID=="DE_00020")
-t3<-t3$t3_pos
+  t2_all <- p0 + p1 * t2_pos
+  return(t2_all)
+}
+
+# Function for L-skewness (tau_3) of the whole process
+calc_t3_all <- function(p0, t2_pos, t3_pos) {
+  p1 <- 1 - p0
   
-t4<-master_regional_data$Final_Summary%>%filter(Station_ID=="DE_00020")
-t4<-t4$t4_pos
+  num <- t2_pos * (p1^2) * t3_pos + 3 * p0 * p1 * t2_pos + 2 * (p0^2) - p0
+  den <- p1 * t2_pos + p0
+  
+  t3_all <- num / den
+  return(t3_all)
+}
 
-l1<-master_regional_data$Final_Summary%>%filter(Station_ID=="DE_00020")
-l1<-l1$l1_pos
-
-l2<-master_regional_data$Final_Summary%>%filter(Station_ID=="DE_00020")
-l2<-l2$l2_pos
-
-l3<-master_regional_data$Final_Summary%>%filter(Station_ID=="DE_00020")
-l3<-l3$l3_pos
-
-l4<-master_regional_data$Final_Summary%>%filter(Station_ID=="DE_00020")
-l4<-l4$l4_pos
+# Function for L-kurtosis (tau_4) of the whole process
+calc_t4_all <- function(p0, t2_pos, t3_pos, t4_pos) {
+  p1 <- 1 - p0
+  
+  num <- (p1^3) * t2_pos * t4_pos +
+         5 * p0 * (p1^2) * t2_pos * t3_pos +
+         3 * p0 * p1 * (3 * p0 - 1) * t2_pos +
+         p0 * (5 * (p0^2) - 5 * p0 + 1)
+  
+  den <- p1 * t2_pos + p0
+  
+  t4_all <- num / den
+  return(t4_all)
+}
 ```
 
 
 ```{r}
-# Load required libraries
-library(DEoptim)
-library(ggplot2)
-library(dplyr)
+# Calculate theoretical values using your empirical positive-only stats
+t2_calc <- calc_t2_all(p0 = p_zero, t2_pos = t2_pos)
+t3_calc <- calc_t3_all(p0 = p_zero, t2_pos = t2_pos, t3_pos = t3_pos)
+t4_calc <- calc_t4_all(p0 = p_zero, t2_pos = t2_pos, t3_pos = t3_pos, t4_pos = t4_pos)
 
-# =========================================================================
-# 1. EXTRACT t3 DATA
-# =========================================================================
-t_val <- master_regional_data$Final_Summary %>% filter(Station_ID == "DE_00020")
-k_seq <- t_val$k_hours
-t3    <- t_val$t3_pos
-
-# =========================================================================
-# 2. DEFINE THE RATIONAL FUNCTION MODEL
-# =========================================================================
-rational_model <- function(k, A, B, alpha) {
-  return(A / (1 + B * (k^alpha)))
-}
-
-obj_t3_rational <- function(p) {
-  # p[1] = A (The Plateau / Ceiling)
-  # p[2] = B (The Scale Factor)
-  # p[3] = alpha (The Decay Exponent)
-  est_t3 <- rational_model(k_seq, p[1], p[2], p[3])
+# Combine into a validation dataframe to inspect the differences
+validation_df <- data.frame(
+  k_hours = k_seq,
+  p_zero  = p_zero,
   
-  # Mean Absolute Percentage Error (MAPE)
-  return(mean(abs((t3 - est_t3) / t3)))
-}
+  # L-variation Validation
+  t2_obs  = t2_all,
+  t2_calc = t2_calc,
+  t2_diff = t2_all - t2_calc,
+  
+  # L-skewness Validation
+  t3_obs  = t3_all,
+  t3_calc = t3_calc,
+  t3_diff = t3_all - t3_calc
+)
 
-# =========================================================================
-# 3. OPTIMIZATION ON ENTIRE DATASET
-# =========================================================================
-set.seed(42)
+# If you have t4_all in your empirical data, you can add it to the dataframe:
+validation_df$t4_obs  <- t4_all
+validation_df$t4_calc <- t4_calc
+validation_df$t4_diff <- t4_all - t4_calc
 
-# Bounds:
-# A: 0.1 to 1.0 (It should easily find the ~0.53 plateau)
-# B: 0.001 to 10 (Scale factor)
-# alpha: 0.1 to 5.0 (Positive exponent, since it's in the denominator)
-lower_bounds <- c(0.1, 0.001, 0.1)
-upper_bounds <- c(1.0, 10.0,  5.0)
 
-fit_t3_rational <- suppressWarnings(DEoptim(obj_t3_rational, 
-                                            lower = lower_bounds, 
-                                            upper = upper_bounds, 
-                                            control = list(itermax = 500, trace = FALSE)))
-
-opt_p_rat <- fit_t3_rational$optim$bestmem
-
-cat("\n=== t3 Rational Function Fit ===\n")
-cat(sprintf("Plateau Ceiling (A): %.4f\n", opt_p_rat[1]))
-cat(sprintf("Scale Factor (B): %.4f\n", opt_p_rat[2]))
-cat(sprintf("Decay Exponent (alpha): %.4f\n", opt_p_rat[3]))
-
-# =========================================================================
-# 4. VISUALIZATION
-# =========================================================================
-k_smooth <- exp(seq(log(min(k_seq)), log(max(k_seq)), length.out = 500))
-t3_pred_smooth <- rational_model(k_smooth, opt_p_rat[1], opt_p_rat[2], opt_p_rat[3])
-
-df_pred <- data.frame(k = k_smooth, t3 = t3_pred_smooth)
-df_orig <- data.frame(k = k_seq, t3 = t3) %>%
-  mutate(Scale = ifelse(k >= 24, "Tail (>= 24h)", "Head (< 24h)"))
-
-ggplot() +
-  geom_line(data = df_pred, aes(x = k, y = t3), color = "#16a085", linewidth = 1.2) +
-  geom_point(data = df_orig, aes(x = k, y = t3, fill = Scale), size = 3, shape = 21, color="black") +
-  scale_x_log10() +
-  scale_fill_manual(values = c("Head (< 24h)" = "#f39c12", "Tail (>= 24h)" = "#2c3e50")) +
-  labs(title = "t3 Fit: Rational Function",
-       subtitle = sprintf("t3 = %.3f / (1 + %.3f * k^%.3f)", 
-                          opt_p_rat[1], opt_p_rat[2], opt_p_rat[3]),
-       x = "Temporal scale, k [h] (Log Scale)", 
-       y = expression(t[3])) +
-  theme_minimal()
 ```
 
 
+```{r}
+# Filter out any exact zeros just in case, to avoid log(0)
+decay_data <- stn_data %>% filter(t3_all > 0, k_hours >= 1)
 
+# Fit a linear model to the log-log data
+# We expect the slope to be negative (decaying)
+tau3_model <- lm(log(t3_all) ~ log(k_hours), data = decay_data)
 
+# Print the slope (this is your empirical decay rate)
+summary(tau3_model)
 
+# Visualize the straight-line power-law decay
+ggplot(decay_data, aes(x = log(k_hours), y = log(t3_all))) +
+  geom_point(size = 3) +
+  geom_smooth(method = "lm", color = "red", se = FALSE) +
+  labs(title = "Proof 2: Power-Law Decay of L-Skewness",
+       x = "log(Aggregation Scale k)",
+       y = "log(tau_3)") +
+  theme_minimal()
+```
 
 
 
