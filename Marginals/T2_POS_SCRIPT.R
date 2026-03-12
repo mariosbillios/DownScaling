@@ -143,3 +143,31 @@ ggplot(all_test_results, aes(x = factor(k_hours), y = APE, fill = Scale_Type)) +
  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
        legend.position = "bottom",
        legend.title = element_blank())
+
+# 
+# 
+# k_smooth <- exp(seq(log(min(test_data$k_hours)), log(max(test_data$k_hours)), length.out = 500))
+# t2_pred_smooth <- surge_linked(k_smooth, opt_p[1], opt_p[2], opt_p[3])
+# 
+# df_pred <- data.frame(k = k_smooth, t2 = t2_pred_smooth)
+# df_orig <- test_data %>%
+#  mutate(Scale = ifelse(k_hours >= 24, "Tail (>= 24h) [Fitted]", "Head (< 24h) [Hidden/Extrapolated]"))
+# 
+# ggplot() +
+#  geom_line(data = df_pred, aes(x = k, y = t2), color = "#d35400", linewidth = 1.2) +
+#  geom_point(data = df_orig, aes(x = k_hours, y = t2_pos, fill = Scale), size = 3, shape = 21, color="black") +
+#  scale_x_log10() +
+#  scale_fill_manual(values = c("Head (< 24h) [Hidden/Extrapolated]" = "orange", "Tail (>= 24h) [Fitted]" = "midnightblue")) +
+#  labs(title = sprintf("Ratio Cross-Validation: Station %s", test_station),
+#       subtitle = sprintf("Trained entirely on tail data | Linked Ratio A/alpha = %.2f", R_mean),
+#       x = "Temporal scale, k [h] (Log Scale)", 
+#       y = expression(t[2])) +
+#  theme_minimal()
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
