@@ -41,121 +41,29 @@ master_regional_data <- readRDS(master_rds_path)
 
 
 ```{r}
-t2_val<-master_regional_data$Final_Summary%>%filter(Station_ID=="DE_00020")
-k_seq<-t2_val$k_hours
-t2_val<-t2_val$t2_pos
+t_val<-master_regional_data$Final_Summary%>%filter(Station_ID=="DE_00020")
+k_seq<-t_val$k_hours
+t2l<-t_val$t2_pos
+
+  
+t3<-master_regional_data$Final_Summary%>%filter(Station_ID=="DE_00020")
+t3<-t3$t3_pos
+  
+t4<-master_regional_data$Final_Summary%>%filter(Station_ID=="DE_00020")
+t4<-t4$t4_pos
+
 l1<-master_regional_data$Final_Summary%>%filter(Station_ID=="DE_00020")
 l1<-l1$l1_pos
+
 l2<-master_regional_data$Final_Summary%>%filter(Station_ID=="DE_00020")
 l2<-l2$l2_pos
+
+l3<-master_regional_data$Final_Summary%>%filter(Station_ID=="DE_00020")
+l3<-l3$l3_pos
+
+l4<-master_regional_data$Final_Summary%>%filter(Station_ID=="DE_00020")
+l4<-l4$l4_pos
 ```
-
-
-
-
-```{r}
-library(DEoptim)
-library(ggplot2)
-library(dplyr)
-
-# 1. Define the Ratio of Power Laws Function
-# f(k) = c + W * [ (k + d1)^-a / (k + d2)^-b ]
-ratio_power_model <- function(k, alpha, beta, d1, d2, W, cc) {
-  num <- (k + d1)^-alpha
-  den <- (k + d2)^-beta
-  return(cc + W * (num / den))
-}
-
-# 2. Filter data for k >= 24
-# Assuming t2_val and k_seq are already aligned in your environment
-df_tail <- data.frame(k = k_seq, t2 = t2_val) %>%
-  filter(k >= 24)
-
-k_train <- df_tail$k
-t2_train <- df_tail$t2
-
-# 3. Objective Function
-obj_func_tail <- function(params) {
-  a   <- params[1]
-  b   <- params[2]
-  d1  <- params[3]
-  d2  <- params[4]
-  W   <- params[5]
-  cc  <- params[6]
-  
-  preds <- ratio_power_model(k_train, a, b, d1, d2, W, cc)
-  
-  # Minimize SSE
-  return(sum((t2_train - preds)^2, na.rm = TRUE))
-}
-
-# 4. Optimization for the Tail
-# We narrow the search for 'c' around your tail values (0.4 - 0.5)
-set.seed(123)
-fit_tail <- DEoptim(fn = obj_func_tail, 
-                    lower = c(0.1, 0.1, 0.0, 0.0, 0.01, 0.35), 
-                    upper = c(5.0, 5.0, 10.0, 10.0, 5.0, 0.50), 
-                    control = DEoptim.control(itermax = 300, trace = 50))
-
-# 5. Extraction
-res_t <- fit_tail$optim$bestmem
-a_t <- res_t[1]; b_t <- res_t[2]
-d1_t <- res_t[3]; d2_t <- res_t[4]
-W_t <- res_t[5]; c_t <- res_t[6]
-
-# 6. Visualization
-k_smooth <- seq(24, 240, length.out = 200)
-df_line <- data.frame(k = k_smooth) %>%
-  mutate(y = ratio_power_model(k, a_t, b_t, d1_t, d2_t, W_t, c_t))
-
-ggplot() +
-  geom_point(data = df_tail, aes(x = k, y = t2), size = 3, color = "black") +
-  geom_line(data = df_line, aes(x = k, y = y), color = "red", linewidth = 1.2) +
-  labs(title = "Tail Fit (k >= 24): Ratio of Power Laws",
-       subtitle = paste("Alpha:", round(a_t, 2), "| Beta:", round(b_t, 2), "| Limit C:", round(c_t, 4)),
-       x = "Threshold (k)", y = "L-CV (t2)") 
-```
-
-```{r}
-# 1. Use the BEST parameters from your previous fit_tail optimization
-# (Ensure these variables are in your environment from the previous step)
-a_opt  <- res_t[1]
-b_opt  <- res_t[2]
-d1_opt <- res_t[3]
-d2_opt <- res_t[4]
-W_opt  <- res_t[5]
-c_opt  <- res_t[6]
-
-# 2. Generate predictions for ALL k (1 to 240)
-k_all_seq <- seq(1, 240, length.out = 500)
-df_validation <- data.frame(k = k_all_seq) %>%
-  mutate(predicted = ratio_power_model(k, a_opt, b_opt, d1_opt, d2_opt, W_opt, c_opt))
-
-# 3. Create a combined data frame for the original points
-# Assuming t2_val and k_seq are your original full vectors
-df_original <- data.frame(k = k_seq, observed = t2_val) %>%
-  mutate(region = ifelse(k >= 24, "Training (Tail)", "Validation (Head)"))
-
-# 4. Plot the results
-ggplot() +
-  # The Full Prediction Line
-  geom_line(data = df_validation, aes(x = k, y = predicted), 
-            color = "darkred", linewidth = 1.2, alpha = 0.8) +
-  # The Data Points (Colored by region)
-  geom_point(data = df_original, aes(x = k, y = observed, color = region), size = 3) +
-  # Vertical line at the training threshold
-  geom_vline(xintercept = 24, linetype = "dashed", color = "grey40") +
-  scale_color_manual(values = c("Training (Tail)" = "black", "Validation (Head)" = "orange")) +
-  labs(title = "Model Validation: Tail-Optimized Parameters on All Data",
-       subtitle = "Does the tail-fit predict the low-k hump?",
-       x = "Threshold (k)", y = "L-CV (t2)",
-       color = "Data Region") +
-  theme_minimal()
-```
-
-
-
-
 
 
 ```{r}
@@ -165,81 +73,73 @@ library(ggplot2)
 library(dplyr)
 
 # =========================================================================
-# 1. Define the Stretched Surge Model (Kohlrausch)
+# 1. EXTRACT t3 DATA
 # =========================================================================
-stretched_surge_model <- function(k, c, A, alpha, beta, gamma) {
-  return(c + A * (k^alpha) * exp(-(beta * k)^gamma))
+t_val <- master_regional_data$Final_Summary %>% filter(Station_ID == "DE_00020")
+k_seq <- t_val$k_hours
+t3    <- t_val$t3_pos
+
+# =========================================================================
+# 2. DEFINE THE RATIONAL FUNCTION MODEL
+# =========================================================================
+rational_model <- function(k, A, B, alpha) {
+  return(A / (1 + B * (k^alpha)))
+}
+
+obj_t3_rational <- function(p) {
+  # p[1] = A (The Plateau / Ceiling)
+  # p[2] = B (The Scale Factor)
+  # p[3] = alpha (The Decay Exponent)
+  est_t3 <- rational_model(k_seq, p[1], p[2], p[3])
+  
+  # Mean Absolute Percentage Error (MAPE)
+  return(mean(abs((t3 - est_t3) / t3)))
 }
 
 # =========================================================================
-# 2. Define the Objective Function
-# =========================================================================
-obj_stretched <- function(p) {
-  # p = c(c, A, alpha, beta, gamma)
-  t2_est <- stretched_surge_model(k_seq, p[1], p[2], p[3], p[4], p[5])
-  
-  # Calculate Mean Absolute Percentage Error (MAPE)
-  err_t2 <- mean(abs((t2_val - t2_est) / t2_val))
-  
-  # Optional: Add a slight penalty to keep gamma within physically realistic bounds 
-  # (though DEoptim bounds usually handle this, a soft penalty helps stability)
-  penalty <- ifelse(p[5] <= 0, 1e6, 0)
-  
-  return(err_t2 + penalty)
-}
-
-# =========================================================================
-# 3. Optimization Setup
+# 3. OPTIMIZATION ON ENTIRE DATASET
 # =========================================================================
 set.seed(42)
 
-# Bounds for p = c(c, A, alpha, beta, gamma)
-# gamma (p[5]): allow anything from 0.1 (very stretched) to 3.0 (very compressed)
-lower_bounds <- c(0.2, 0.001, 0.01, 0.001, 0.1)
-upper_bounds <- c(0.8, 10,    5,    1,     3.0)
+# Bounds:
+# A: 0.1 to 1.0 (It should easily find the ~0.53 plateau)
+# B: 0.001 to 10 (Scale factor)
+# alpha: 0.1 to 5.0 (Positive exponent, since it's in the denominator)
+lower_bounds <- c(0.1, 0.001, 0.1)
+upper_bounds <- c(1.0, 10.0,  5.0)
 
-# Run Optimizer
-fit_stretched <- DEoptim(obj_stretched, 
-                         lower = lower_bounds, 
-                         upper = upper_bounds, 
-                         control = list(itermax = 1500, trace = FALSE))
+fit_t3_rational <- suppressWarnings(DEoptim(obj_t3_rational, 
+                                            lower = lower_bounds, 
+                                            upper = upper_bounds, 
+                                            control = list(itermax = 500, trace = FALSE)))
 
-# =========================================================================
-# 4. Extract and Print Results
-# =========================================================================
-opt_p <- fit_stretched$optim$bestmem
-cat("\n=== Stretched Surge Model Parameters ===\n")
-cat(sprintf("Baseline (c): %.4f\n", opt_p[1]))
-cat(sprintf("Scale (A): %.4f\n", opt_p[2]))
-cat(sprintf("Power Rise (alpha): %.4f\n", opt_p[3]))
-cat(sprintf("Exp Decay (beta): %.4f\n", opt_p[4]))
-cat(sprintf("Shape Parameter (gamma): %.4f\n", opt_p[5]))
+opt_p_rat <- fit_t3_rational$optim$bestmem
 
-if (opt_p[5] > 1) {
-  cat("Result: gamma > 1 (Compressed exponential: sharper drop-off)\n")
-} else if (opt_p[5] < 1) {
-  cat("Result: gamma < 1 (Stretched exponential: longer, dragging tail)\n")
-}
+cat("\n=== t3 Rational Function Fit ===\n")
+cat(sprintf("Plateau Ceiling (A): %.4f\n", opt_p_rat[1]))
+cat(sprintf("Scale Factor (B): %.4f\n", opt_p_rat[2]))
+cat(sprintf("Decay Exponent (alpha): %.4f\n", opt_p_rat[3]))
 
 # =========================================================================
-# 5. Visualization
+# 4. VISUALIZATION
 # =========================================================================
 k_smooth <- exp(seq(log(min(k_seq)), log(max(k_seq)), length.out = 500))
-t2_pred_smooth <- stretched_surge_model(k_smooth, opt_p[1], opt_p[2], opt_p[3], opt_p[4], opt_p[5])
+t3_pred_smooth <- rational_model(k_smooth, opt_p_rat[1], opt_p_rat[2], opt_p_rat[3])
 
-df_pred <- data.frame(k = k_smooth, t2 = t2_pred_smooth)
-df_orig <- data.frame(k = k_seq, t2 = t2_val) %>%
+df_pred <- data.frame(k = k_smooth, t3 = t3_pred_smooth)
+df_orig <- data.frame(k = k_seq, t3 = t3) %>%
   mutate(Scale = ifelse(k >= 24, "Tail (>= 24h)", "Head (< 24h)"))
 
 ggplot() +
-  geom_line(data = df_pred, aes(x = k, y = t2), color = "#27ae60", linewidth = 1.2) +
-  geom_point(data = df_orig, aes(x = k, y = t2, fill = Scale), size = 3, shape = 21, color="black") +
+  geom_line(data = df_pred, aes(x = k, y = t3), color = "#16a085", linewidth = 1.2) +
+  geom_point(data = df_orig, aes(x = k, y = t3, fill = Scale), size = 3, shape = 21, color="black") +
   scale_x_log10() +
   scale_fill_manual(values = c("Head (< 24h)" = "#f39c12", "Tail (>= 24h)" = "#2c3e50")) +
-  labs(title = "Stretched Surge Model Fit (Kohlrausch)",
-       subtitle = sprintf("gamma = %.3f | beta = %.4f", opt_p[5], opt_p[4]),
+  labs(title = "t3 Fit: Rational Function",
+       subtitle = sprintf("t3 = %.3f / (1 + %.3f * k^%.3f)", 
+                          opt_p_rat[1], opt_p_rat[2], opt_p_rat[3]),
        x = "Temporal scale, k [h] (Log Scale)", 
-       y = expression(t[2])) +
+       y = expression(t[3])) +
   theme_minimal()
 ```
 
@@ -247,202 +147,6 @@ ggplot() +
 
 
 
-
-
-```{r}
-# Load required libraries
-library(DEoptim)
-library(ggplot2)
-library(dplyr)
-
-
-# =========================================================================
-# 1. SETUP TRAIN & TEST STATIONS
-# =========================================================================
-all_stations <- unique(master_regional_data$Final_Summary$Station_ID)
-
-# Randomly pick 5 stations for training
-train_stations <- sample(all_stations, 100)
-
-# Pick 1 test station (not in training set)
-test_station <- sample(setdiff(all_stations, train_stations), 1)
-
-cat("Training Stations:", paste(train_stations, collapse = ", "), "\n")
-cat("Test Station:", test_station, "\n\n")
-
-# =========================================================================
-# 2. TRAINING PHASE: BUILD params_df & FIND THE REGIONAL RATIO
-# =========================================================================
-surge_4param <- function(k, A, alpha, beta, gamma) {
-  return(A * (k^alpha) * exp(-(beta * k)^gamma))
-}
-
-# Initialize an empty list to store the dataframes for each station
-results_list <- list()
-
-for (i in seq_along(train_stations)) {
-  stn <- train_stations[i]
-  stn_data <- master_regional_data$Final_Summary %>% filter(Station_ID == stn)
-  
-  obj_train <- function(p) {
-    est <- surge_4param(stn_data$k_hours, p[1], p[2], p[3], p[4])
-    return(mean(abs((stn_data$t2_pos - est) / stn_data$t2_pos))) # MAPE
-  }
-  
-  # Fit full 4-parameter model
-  fit <- suppressWarnings(DEoptim(obj_train, lower = c(0.1, 0.01, 0.001, 0.1), 
-                                  upper = c(10, 5, 1, 3), 
-                                  control = list(itermax = 400, trace = FALSE)))
-  
-  opt_p <- fit$optim$bestmem
-  
-  # Store the results for this specific station in a dataframe
-  results_list[[i]] <- data.frame(
-    Station_ID = stn,
-    A_param = opt_p[1],
-    alpha_param = opt_p[2],
-    beta_param = opt_p[3],
-    gamma_param = opt_p[4],
-    Ratio_A_alpha = opt_p[1] / opt_p[2], # Calculate ratio directly here
-    MAPE = fit$optim$bestval
-  )
-}
-
-# Combine the list of dataframes into a single params_df
-params_df <- bind_rows(results_list)
-
-# Calculate the mean ratio from the dataframe
-R_mean <- mean(params_df$Ratio_A_alpha)
-
-cat(sprintf("=== Regional Parameter Link ===\nMean Ratio (A / alpha) = %.4f\n\n", R_mean))
-
-# View the first few rows of your new dataframe
-head(params_df)
-
-# =========================================================================
-# 3. TESTING PHASE: FIT TAIL OF UNSEEN STATION USING LINKED MODEL
-# =========================================================================
-test_data <- master_regional_data$Final_Summary %>% filter(Station_ID == test_station)
-tail_data <- test_data %>% filter(k_hours >= 24)
-
-# 3-Parameter Linked Model (A is calculated dynamically as R_mean * alpha)
-surge_linked <- function(k, alpha, beta, gamma) {
-  linked_A <- R_mean * alpha
-  return(linked_A * (k^alpha) * exp(-(beta * k)^gamma))
-}
-
-obj_test_tail <- function(p) {
-  # p = c(alpha, beta, gamma)
-  est <- surge_linked(tail_data$k_hours, p[1], p[2], p[3])
-  return(mean(abs((tail_data$t2_pos - est) / tail_data$t2_pos)))
-}
-
-# Fit ONLY to the tail of the test station
-fit_test <- suppressWarnings(DEoptim(obj_test_tail, lower = c(0.01, 0.001, 0.1), upper = c(5, 1, 3), 
-                                     control = list(itermax = 500, trace = FALSE)))
-
-opt_p <- fit_test$optim$bestmem
-predicted_A <- R_mean * opt_p[1]
-
-cat("=== Test Station Parameters (Fitted on Tail Only) ===\n")
-cat(sprintf("alpha (Fitted): %.4f\n", opt_p[1]))
-cat(sprintf("A (Predicted via Ratio): %.4f\n", predicted_A))
-cat(sprintf("beta (Fitted): %.4f\n", opt_p[2]))
-cat(sprintf("gamma (Fitted): %.4f\n", opt_p[3]))
-
-# =========================================================================
-# 4. EXTRAPOLATE AND VISUALIZE
-# =========================================================================
-k_smooth <- exp(seq(log(min(test_data$k_hours)), log(max(test_data$k_hours)), length.out = 500))
-t2_pred_smooth <- surge_linked(k_smooth, opt_p[1], opt_p[2], opt_p[3])
-
-df_pred <- data.frame(k = k_smooth, t2 = t2_pred_smooth)
-df_orig <- test_data %>%
-  mutate(Scale = ifelse(k_hours >= 24, "Tail (>= 24h) [Fitted]", "Head (< 24h) [Hidden/Extrapolated]"))
-
-ggplot() +
-  geom_line(data = df_pred, aes(x = k, y = t2), color = "#d35400", linewidth = 1.2) +
-  geom_point(data = df_orig, aes(x = k_hours, y = t2_pos, fill = Scale), size = 3, shape = 21, color="black") +
-  scale_x_log10() +
-  scale_fill_manual(values = c("Head (< 24h) [Hidden/Extrapolated]" = "orange", "Tail (>= 24h) [Fitted]" = "midnightblue")) +
-  labs(title = sprintf("Ratio Cross-Validation: Station %s", test_station),
-       subtitle = sprintf("Trained entirely on tail data | Linked Ratio A/alpha = %.2f", R_mean),
-       x = "Temporal scale, k [h] (Log Scale)", 
-       y = expression(t[2])) +
-  theme_minimal()
-
-
-
-```
-
-
-```{r}
-# Load required libraries
-library(ggplot2)
-library(dplyr)
-library(patchwork) # For arranging multiple plots easily
-
-# =========================================================================
-# 1. MERGE DATA AND CALCULATE THE RATIO
-# =========================================================================
-# We take the parameters you already optimized and join them with the metadata
-analysis_df <- params_df %>%
-  left_join(master_regional_data[["Quality_Metadata"]], by = "Station_ID") %>%
-  # Calculate our target ratio
-  mutate(Ratio_A_alpha = A_param / alpha_param)
-
-# Check to ensure merge was successful and drop NAs if any metadata is missing
-analysis_df <- analysis_df %>% filter(!is.na(Ratio_A_alpha), !is.na(Elevation_m))
-
-# =========================================================================
-# 2. GENERATE SCATTER PLOTS (X, Y, Z)
-# =========================================================================
-# Plot 1: Ratio vs Longitude (X)
-p_x <- ggplot(analysis_df, aes(x = Longitude, y = Ratio_A_alpha)) +
-  geom_point(color = "#3498db", size = 3, alpha = 0.7) +
-  geom_smooth(method = "lm", color = "black", linetype = "dashed") +
-  labs(title = "Ratio vs. Longitude (X)", 
-       x = "Longitude", 
-       y = expression(Ratio~(A/alpha))) +
-  theme_bw()
-
-# Plot 2: Ratio vs Latitude (Y)
-p_y <- ggplot(analysis_df, aes(x = Latitude, y = Ratio_A_alpha)) +
-  geom_point(color = "#2ecc71", size = 3, alpha = 0.7) +
-  geom_smooth(method = "lm", color = "black", linetype = "dashed") +
-  labs(title = "Ratio vs. Latitude (Y)", 
-       x = "Latitude", 
-       y = expression(Ratio~(A/alpha))) +
-  theme_bw()
-
-# Plot 3: Ratio vs Elevation (Z)
-p_z <- ggplot(analysis_df, aes(x = Elevation_m, y = Ratio_A_alpha)) +
-  geom_point(color = "#e67e22", size = 3, alpha = 0.7) +
-  geom_smooth(method = "lm", color = "black", linetype = "dashed") +
-  labs(title = "Ratio vs. Elevation (Z)", 
-       x = "Elevation (m)", 
-       y = expression(Ratio~(A/alpha))) +
-  theme_bw()
-
-# =========================================================================
-# 3. GENERATE SPATIAL MAP (X vs Y colored by Ratio)
-# =========================================================================
-p_map <- ggplot(analysis_df, aes(x = Longitude, y = Latitude, color = Ratio_A_alpha)) +
-  geom_point(size = 5, alpha = 0.9) +
-  scale_color_viridis_c(option = "plasma", name = "A / alpha") +
-  labs(title = "Spatial Distribution of the Ratio", 
-       subtitle = "Looking for geographic clustering",
-       x = "Longitude", 
-       y = "Latitude") +
-  theme_minimal() +
-  theme(legend.position = "right")
-
-# =========================================================================
-# 4. DISPLAY ALL PLOTS TOGETHER
-# =========================================================================
-# The patchwork package makes this syntax beautifully simple
-(p_x | p_y | p_z) / p_map
-```
 
 
 

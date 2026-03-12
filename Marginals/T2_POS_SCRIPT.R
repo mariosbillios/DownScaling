@@ -42,9 +42,9 @@ cat(sprintf("Selected %d Training Stations.\n", length(train_stations)))
 cat(sprintf("Selected %d Testing Stations.\n\n", length(test_stations)))
 
 # =========================================================================
-# 4. TRAINING PHASE: FIND THE REGIONAL RATIO (A / alpha)
+# 4. TRAINING PHASE: FIND THE REGIONAL RATIO (A / alpha) & PLOT
 # =========================================================================
-cat("Training Phase: Calculating Regional Ratio...\n")
+cat("Training Phase: Calculating Regional Ratio and Plotting...\n")
 
 surge_4param <- function(k, A, alpha, beta, gamma) {
  return(A * (k^alpha) * exp(-(beta * k)^gamma))
@@ -67,17 +67,36 @@ for (stn in train_stations) {
  
  opt_A <- fit$optim$bestmem[1]
  opt_alpha <- fit$optim$bestmem[2]
+ opt_beta <- fit$optim$bestmem[3]
+ opt_gamma <- fit$optim$bestmem[4]
  
  ratios <- c(ratios, opt_A / opt_alpha)
+ 
+ # PLOTTING THE TRAINING FIT
+ k_seq <- exp(seq(log(min(stn_data$k_hours)), log(max(stn_data$k_hours)), length.out = 500))
+ t2_pred <- surge_4param(k_seq, opt_A, opt_alpha, opt_beta, opt_gamma)
+ 
+ p_train <- ggplot() +
+  geom_point(data = stn_data, aes(x = k_hours, y = t2_pos), size = 3, shape = 21, fill = "gray70") +
+  geom_line(data = data.frame(k = k_seq, t2 = t2_pred), aes(x = k, y = t2), color = "steelblue", linewidth = 1.2) +
+  scale_x_log10() +
+  labs(title = sprintf("Training Fit: Station %s", stn),
+       subtitle = sprintf("4-Parameter Model | Ratio A/alpha = %.2f", opt_A / opt_alpha),
+       x = "Temporal scale, k [h] (Log Scale)", 
+       y = expression(t[2])) +
+  theme_minimal()
+ 
+ # Save plot
+ ggsave(file.path(plots_dir, sprintf("Train_Station_%s.png", stn)), plot = p_train, width = 7, height = 5, bg = "white")
 }
 
 R_mean <- mean(ratios)
 cat(sprintf("=== Regional Parameter Link ===\nMean Ratio (A / alpha) = %.4f\n\n", R_mean))
 
 # =========================================================================
-# 5. TESTING PHASE: EVALUATE ON 20 UNSEEN STATIONS
+# 5. TESTING PHASE: EVALUATE ON 20 UNSEEN STATIONS & PLOT
 # =========================================================================
-cat("Testing Phase: Fitting Tails and Extrapolating Heads...\n")
+cat("Testing Phase: Fitting Tails, Extrapolating Heads, and Plotting...\n")
 
 # 3-Parameter Linked Model
 surge_linked <- function(k, alpha, beta, gamma) {
@@ -120,18 +139,41 @@ for (i in seq_along(test_stations)) {
   APE = ape,
   Scale_Type = ifelse(test_data$k_hours >= 24, "Tail (>= 24h) [Fitted]", "Head (< 24h) [Extrapolated]")
  )
+ 
+ # PLOTTING THE VALIDATION FIT
+ k_smooth <- exp(seq(log(min(test_data$k_hours)), log(max(test_data$k_hours)), length.out = 500))
+ t2_pred_smooth <- surge_linked(k_smooth, opt_p[1], opt_p[2], opt_p[3])
+ 
+ df_pred <- data.frame(k = k_smooth, t2 = t2_pred_smooth)
+ df_orig <- test_data %>%
+  mutate(Scale = ifelse(k_hours >= 24, "Tail (>= 24h) [Fitted]", "Head (< 24h) [Hidden/Extrapolated]"))
+ 
+ p_test <- ggplot() +
+  geom_line(data = df_pred, aes(x = k, y = t2), color = "#d35400", linewidth = 1.2) +
+  geom_point(data = df_orig, aes(x = k_hours, y = t2_pos, fill = Scale), size = 3, shape = 21, color="black") +
+  scale_x_log10() +
+  scale_fill_manual(values = c("Head (< 24h) [Hidden/Extrapolated]" = "orange", "Tail (>= 24h) [Fitted]" = "midnightblue")) +
+  labs(title = sprintf("Validation Fit: Station %s", stn),
+       subtitle = sprintf("Trained entirely on tail data | Linked Ratio A/alpha = %.2f", R_mean),
+       x = "Temporal scale, k [h] (Log Scale)", 
+       y = expression(t[2])) +
+  theme_minimal() +
+  theme(legend.position = "bottom", legend.title = element_blank())
+ 
+ # Save plot
+ ggsave(file.path(plots_dir, sprintf("Test_Station_%s.png", stn)), plot = p_test, width = 7, height = 5, bg = "white")
 }
 
 # Combine all results
 all_test_results <- bind_rows(test_results_list)
 
-cat("\nCross-Validation Complete! Generating Boxplots...\n")
+cat("\nCross-Validation Complete! Plots exported to directory.\n")
 
 # =========================================================================
 # 6. VISUALIZE MAPE DISTRIBUTION ACROSS SCALES
 # =========================================================================
 # Convert k_hours to a factor so ggplot treats them as distinct categorical boxes
-ggplot(all_test_results, aes(x = factor(k_hours), y = APE, fill = Scale_Type)) +
+p_boxplot <- ggplot(all_test_results, aes(x = factor(k_hours), y = APE, fill = Scale_Type)) +
  geom_boxplot(outlier.shape = 21, outlier.fill = "white", outlier.alpha = 0.5, alpha = 0.8) +
  scale_fill_manual(values = c("Head (< 24h) [Extrapolated]" = "#f39c12", 
                               "Tail (>= 24h) [Fitted]" = "#2c3e50")) +
@@ -144,30 +186,5 @@ ggplot(all_test_results, aes(x = factor(k_hours), y = APE, fill = Scale_Type)) +
        legend.position = "bottom",
        legend.title = element_blank())
 
-# 
-# 
-# k_smooth <- exp(seq(log(min(test_data$k_hours)), log(max(test_data$k_hours)), length.out = 500))
-# t2_pred_smooth <- surge_linked(k_smooth, opt_p[1], opt_p[2], opt_p[3])
-# 
-# df_pred <- data.frame(k = k_smooth, t2 = t2_pred_smooth)
-# df_orig <- test_data %>%
-#  mutate(Scale = ifelse(k_hours >= 24, "Tail (>= 24h) [Fitted]", "Head (< 24h) [Hidden/Extrapolated]"))
-# 
-# ggplot() +
-#  geom_line(data = df_pred, aes(x = k, y = t2), color = "#d35400", linewidth = 1.2) +
-#  geom_point(data = df_orig, aes(x = k_hours, y = t2_pos, fill = Scale), size = 3, shape = 21, color="black") +
-#  scale_x_log10() +
-#  scale_fill_manual(values = c("Head (< 24h) [Hidden/Extrapolated]" = "orange", "Tail (>= 24h) [Fitted]" = "midnightblue")) +
-#  labs(title = sprintf("Ratio Cross-Validation: Station %s", test_station),
-#       subtitle = sprintf("Trained entirely on tail data | Linked Ratio A/alpha = %.2f", R_mean),
-#       x = "Temporal scale, k [h] (Log Scale)", 
-#       y = expression(t[2])) +
-#  theme_minimal()
-# 
-# 
-# 
-# 
-# 
-# 
-# 
-# 
+# Save the final summary boxplot
+ggsave(file.path(plots_dir, "Summary_CrossValidation_Error.png"), plot = p_boxplot, width = 9, height = 6, bg = "white")
