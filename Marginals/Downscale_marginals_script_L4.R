@@ -1,713 +1,502 @@
+# =====================================================================
+# MODULAR DOWNSCALING SCRIPT (ALL-IN-ONE)
+# =====================================================================
 
+# ---------------------------------------------------------------------
+# 1. LIBRARIES & CONFIGURATION
+# ---------------------------------------------------------------------
 library(dplyr)
 library(lubridate)
 library(lmomco)
 library(DEoptim)
 library(tools)
-library(patchwork)
 library(ggplot2)
 library(tidyr)
 
+# Auto-detect Google Drive path
+gdrive_path <- paste(LETTERS[file.exists(paste0(LETTERS, ":/My Drive"))], ":/My Drive", sep = "")
 
-
-# Define expected models and data globally
-global_expected_models <- c("Weibull_1p", "PowerLaw_1p", "Weibull_2p", "PowerLaw_2p")
-global_expected_data   <- c("Calib. data", "Valid. data")
-
-# Define the plotting function
-plot_statistic_dynamic <- function(stat_name, y_label = stat_name, show_legend = FALSE, fixed_y = TRUE) {
- 
- # Prepare Empirical Data points (Using the _df variables from your loop)
- emp_data <- final_summary_df %>%
-  select(k_hours, value = !!sym(stat_name)) %>%
-  filter(!is.na(value)) %>%
-  mutate(Data_Type = ifelse(k_hours >= 24, "Calib. data", "Valid. data"))
- 
- max_k <- max(emp_data$k_hours, na.rm = TRUE)
- q_k_star_val <- emp_data$value[emp_data$k_hours == 24]
- 
- if(length(q_k_star_val) == 0) {
-  warning(paste("No 24h anchor found for", stat_name, "- skipping plot."))
-  return(NULL) 
- }
- 
- k_smooth <- exp(seq(log(1), log(max_k), length.out = 500))
- params <- optimized_parameters_df %>% filter(Statistic == stat_name)
- 
- smooth_lines_list <- list()
- for (i in 1:nrow(params)) {
-  m_name <- params$Model[i]
-  H0_val <- params$H0[i]
-  a_val  <- params$Param_a[i]
-  b_val  <- params$Param_b[i]
-  
-  pred_smooth <- switch(m_name,
-                        "Weibull_2p"  = H_W_2p(k_smooth, H0_val, 24, q_k_star_val, a_val),
-                        "PowerLaw_2p" = H_L_2p(k_smooth, H0_val, 24, q_k_star_val, b_val),
-                        "Weibull_1p"  = H_W_1p_pdry(k_smooth, 24, q_k_star_val, a_val),
-                        "PowerLaw_1p" = H_L_1p_pdry(k_smooth, 24, q_k_star_val, b_val),
-                        rep(NA, length(k_smooth))
+APP_CONFIG <- list(
+  paths = list(
+    data_dir = file.path(gdrive_path, "General_Data/GSDR", "QC_d data - Germany"),
+    export_dir = file.path(gdrive_path, "Academic_git/DownScaling/Marginals", "QC_d data - Germany", "Station_Results")
+  ),
+  parameters = list(
+    k_star = 24,
+    all_k = c(1:12, 24, 24*2, 24*3, 24*4, 24*5, 24*9, 24*10),
+    max_H0 = 1,
+    global_expected_models = c("Weibull_1p", "PowerLaw_1p", "Weibull_2p", "PowerLaw_2p"),
+    global_expected_data = c("Calib. data", "Valid. data")
+  ),
+  deoptim_ctrl = DEoptim.control(
+    trace = FALSE, itermax = 1000, NP = 50, reltol = 1e-11, steptol = 500
   )
-  smooth_lines_list[[i]] <- data.frame(Scale_k = k_smooth, Model = m_name, value = pred_smooth)
- }
- 
- smooth_data <- bind_rows(smooth_lines_list) %>% filter(!is.na(value))
- 
- line_colors <- c("Weibull_1p" = "blue", "PowerLaw_1p" = "red",
-                  "Weibull_2p" = "blue", "PowerLaw_2p" = "red")
- 
- line_types <- c("Weibull_1p" = "solid", "PowerLaw_1p" = "solid",
-                 "Weibull_2p" = "dashed", "PowerLaw_2p" = "dashed")
- 
- custom_breaks <- c(1, 6, 12, 24, 120, 240)
- custom_breaks <- custom_breaks[custom_breaks <= max_k] 
- 
- fill_guide  <- if(show_legend) guide_legend(order = 1, ncol = 1) else "none"
- line_guide  <- if(show_legend) guide_legend(order = 2, nrow = 2) else "none"
- 
- p <- ggplot() +
-  geom_line(data = smooth_data, aes(x = Scale_k, y = value, color = Model, linetype = Model), linewidth = 1) +
-  geom_point(data = emp_data, aes(x = k_hours, y = value, fill = Data_Type), 
-             shape = 21, color = "white", size = 3, stroke = 0.5) +
-  geom_vline(xintercept = 24, linetype = "dashed", color = "darkgray", linewidth = 0.8) +
-  scale_x_log10(breaks = custom_breaks, labels = custom_breaks) +
-  scale_fill_manual(name = "", values = c("Calib. data" = "black", "Valid. data" = "orange"),
-                    limits = global_expected_data, drop = FALSE, guide = fill_guide) +
-  scale_color_manual(name = "", values = line_colors, limits = global_expected_models, 
-                     drop = FALSE, guide = line_guide) +
-  scale_linetype_manual(name = "", values = line_types, limits = global_expected_models, 
-                        drop = FALSE, guide = line_guide) +
-  labs(x = "Temporal scale, k [h]", y = y_label) +
-  theme_bw() +
-  theme(
-   panel.grid.major = element_line(linetype = "dashed", color = "lightgray"),
-   panel.grid.minor = element_blank(),
-   axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
-   axis.text.y = element_text(angle = 90, vjust = 0.5, hjust = 0.5),
-   legend.key = element_blank(),
-   legend.background = element_blank()
-  )
- 
- if (fixed_y) {
-  p <- p + scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.2))
- }
- 
- return(p)
-}
+)
 
-plot_qq_dynamic <- function(stat_name, y_label = stat_name) {
- 
- # 1. Filter predictions for the specific statistic
- df_stat <- all_predictions_df %>% 
-  filter(Statistic == stat_name) %>%
-  filter(!is.na(Actual)) %>% # Remove extrapolated k=0.25 if it has no empirical data
-  mutate(Data_Type = ifelse(Scale_k >= 24, "Calib. data", "Valid. data"))
- 
- if(nrow(df_stat) == 0) return(NULL)
- 
- # 2. Pivot data to long format so we can facet by Model
- # We gather all columns EXCEPT Scale_k, Statistic, Actual, and Data_Type
- model_cols <- setdiff(names(df_stat), c("Scale_k", "Statistic", "Actual", "Data_Type"))
- 
- df_long <- df_stat %>%
-  pivot_longer(cols = all_of(model_cols), names_to = "Model", values_to = "Predicted") %>%
-  filter(!is.na(Predicted))
- 
- if(nrow(df_long) == 0) return(NULL)
- 
- # 3. Find global min/max so the X and Y axes perfectly match (true 1:1 plot)
- min_val <- min(c(df_long$Actual, df_long$Predicted), na.rm = TRUE)
- max_val <- max(c(df_long$Actual, df_long$Predicted), na.rm = TRUE)
- buffer <- (max_val - min_val) * 0.05
- if(buffer == 0) buffer <- 0.05
- 
- # 4. Generate the Plot
- p <- ggplot(df_long, aes(x = Actual, y = Predicted)) +
-  # The 1:1 perfect agreement line
-  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "darkgray", linewidth = 0.8) +
-  
-  # The actual data points
-  geom_point(aes(fill = Data_Type), shape = 21, color = "white", size = 2.5, stroke = 0.5) +
-  
-  # Create separate panels for each model (e.g., Weibull_1p, Weibull_2p, etc.)
-  facet_wrap(~ Model) + 
-  
-  # Formatting
-  scale_fill_manual(name = "", values = c("Calib. data" = "black", "Valid. data" = "orange")) +
-  scale_x_continuous(limits = c(min_val - buffer, max_val + buffer)) +
-  scale_y_continuous(limits = c(min_val - buffer, max_val + buffer)) +
-  coord_fixed(ratio = 1) + # Forces the plot to be perfectly square
-  
-  labs(
-   title = bquote("Empirical vs Predicted:" ~ .(y_label[[1]])),
-   x = bquote("Empirical (Actual)" ~ .(y_label[[1]])),
-   y = bquote("Predicted" ~ .(y_label[[1]]))
-  )  +
-  theme_bw() +
-  theme(
-   panel.grid.major = element_line(linetype = "dotted", color = "lightgray"),
-   panel.grid.minor = element_blank(),
-   strip.background = element_rect(fill = "whitesmoke"),
-   strip.text = element_text(face = "bold"),
-   legend.position = "bottom"
-  )
- 
- return(p)
-}
-
-
-
-
-
-
-
-
-
-
-
-
-H_W_2p <- function(k, H0, k_star, q_k_star, a) {
- power_exponent <- (k / k_star)^a
- base_fraction <- q_k_star / H0
- H0 * (base_fraction ^ power_exponent)
-}
-
-H_L_2p <- function(k, H0, k_star, q_k_star, b) {
- ln_numerator <- log(1 + b * k)
- ln_denominator <- log(1 + b * k_star)
- power_exponent <- ln_numerator / ln_denominator
- base_fraction <- q_k_star / H0
- H0 * (base_fraction ^ power_exponent)
-}
-
-
-H_W_1p_pdry <- function(k, k_star, q_k_star, a) {
- H0 <- 0.99
- power_exponent <- (k / k_star)^a
- base_fraction <- q_k_star / H0
- H0 * (base_fraction ^ power_exponent)
-}
-
-H_L_1p_pdry <- function(k, k_star, q_k_star, b) {
- H0 <- 0.99
- ln_numerator <- log(1 + b * k)
- ln_denominator <- log(1 + b * k_star)
- power_exponent <- ln_numerator / ln_denominator
- base_fraction <- q_k_star / H0
- H0 * (base_fraction ^ power_exponent)
-}
-
+# ---------------------------------------------------------------------
+# 2. MATHEMATICAL MODELS & LOSS FUNCTIONS
+# ---------------------------------------------------------------------
+H_W_2p <- function(k, H0, k_star, q_k_star, a) { H0 * ((q_k_star / H0) ^ ((k / k_star)^a)) }
+H_L_2p <- function(k, H0, k_star, q_k_star, b) { H0 * ((q_k_star / H0) ^ (log(1 + b * k) / log(1 + b * k_star))) }
+H_W_1p_pdry <- function(k, k_star, q_k_star, a) { 0.99 * ((q_k_star / 0.99) ^ ((k / k_star)^a)) }
+H_L_1p_pdry <- function(k, k_star, q_k_star, b) { 0.99 * ((q_k_star / 0.99) ^ (log(1 + b * k) / log(1 + b * k_star))) }
 
 mse_W_2p <- function(par, k, y, k_star, q_k_star) mean((y - H_W_2p(k, par[1], k_star, q_k_star, par[2]))^2, na.rm=TRUE)
 mse_L_2p <- function(par, k, y, k_star, q_k_star) mean((y - H_L_2p(k, par[1], k_star, q_k_star, par[2]))^2, na.rm=TRUE)
-
 mse_W_1p <- function(par, k, y, k_star, q_k_star) mean((y - H_W_1p_pdry(k, k_star, q_k_star, par[1]))^2, na.rm=TRUE)
 mse_L_1p <- function(par, k, y, k_star, q_k_star) mean((y - H_L_1p_pdry(k, k_star, q_k_star, par[1]))^2, na.rm=TRUE)
 
-calculate_mse <- function(actual, predicted) {
- mean((actual - predicted)^2, na.rm = TRUE)
+calculate_mse <- function(actual, predicted) { mean((actual - predicted)^2, na.rm = TRUE) }
+
+# ---------------------------------------------------------------------
+# 3. ALGEBRAIC DERIVATIONS (Derive t_pos from t_all)
+# ---------------------------------------------------------------------
+calc_t2_pos <- function(p0, t2_all) {
+  p1 <- 1 - p0
+  ifelse(p1 == 0, NA, (t2_all - p0) / p1)
 }
 
-# =====================================================================
-# =====================================================================
+calc_t3_pos <- function(p0, t2_all, t3_all) {
+  p1 <- 1 - p0
+  num <- t3_all * t2_all - 3 * p0 * t2_all + (p0^2) + p0
+  den <- p1 * (t2_all - p0)
+  ifelse(den == 0 | is.na(den), NA, num / den)
+}
 
+calc_t4_pos <- function(p0, t2_all, t3_all, t4_all) {
+  p1 <- 1 - p0
+  num <- t4_all * t2_all - 5 * p0 * t3_all * t2_all + (6 * (p0^2) + 3 * p0) * t2_all - ((p0^3) + 3 * (p0^2) + p0)
+  den <- (p1^2) * (t2_all - p0)
+  ifelse(den == 0 | is.na(den), NA, num / den)
+}
 
-gdrive_path <- paste(LETTERS[file.exists(paste0(LETTERS, ":/My Drive"))], ":/My Drive", sep = "")
-project_path <- file.path(gdrive_path, "Academic_git/DownScaling")
-
-
-data_dir_name <- "QC_d data - Germany" 
-data_dir <- file.path(gdrive_path, "General_Data/GSDR", data_dir_name)
-
-
-individual_dir <- file.path(project_path, "Marginals",data_dir_name,"Testing") # Export directory
-
-
-
-station_files <- list.files(path = data_dir, pattern = "\\.txt$", full.names = TRUE)
-
-# =====================================================================
-# =====================================================================
-
-station_files<-station_files[1]
-
-
-for (current_station_file in station_files) {
- 
- 
- 
- # Extract current station name for export and logging
- station_name <- tools::file_path_sans_ext(basename(current_station_file))
- 
- # Wrap the entire processing logic in tryCatch
- tryCatch({
-  
-  df <- read.table(current_station_file, skip = 21, col.names = "precip")
+# ---------------------------------------------------------------------
+# 4. DATA PREP & AGGREGATION
+# ---------------------------------------------------------------------
+load_station_data <- function(filepath) {
+  df <- read.table(filepath, skip = 21, col.names = "precip")
   df$precip[df$precip == -999] <- NA
   
-  header_lines <- readLines(current_station_file, n = 21)
+  header_lines <- readLines(filepath, n = 21)
   start_date_str <- sub("Start datetime: ", "", grep("^Start datetime:", header_lines, value = TRUE))
-  end_date_str <- sub("End datetime: ", "", grep("^End datetime:", header_lines, value = TRUE))
+  end_date_str   <- sub("End datetime: ", "", grep("^End datetime:", header_lines, value = TRUE))
   
   start_ts <- ymd_h(start_date_str)
-  end_ts <- ymd_h(end_date_str)
-  df$date <- seq(start_ts, end_ts, by = "hour")
+  end_ts   <- ymd_h(end_date_str)
+  df$date  <- seq(start_ts, end_ts, by = "hour")
   
-  
-  
-  # =====================================================================
-  # 1. INITIAL METADATA CHECK (Place this right after defining start_ts / end_ts)
-  # =====================================================================
-  
-  meta_records_str <- grep("^Number of records:", header_lines, value = TRUE)
-  meta_missing_str <- grep("^Percent missing data:", header_lines, value = TRUE)
-  
-  metadata_records <- as.numeric(sub("Number of records: ", "", meta_records_str))
-  metadata_missing_pct <- as.numeric(sub("Percent missing data: ", "", meta_missing_str))
-  
-  # Calculate Theoretical Data (Total hours between start and end)
   theoretical_records <- as.numeric(difftime(end_ts, start_ts, units = "hours")) + 1
+  metadata <- list(
+    Start_Datetime = start_ts, End_Datetime = end_ts,
+    Theoretical_Records = theoretical_records,
+    Explicit_NAs = sum(is.na(df$precip)),
+    Missing_Rows = max(0, theoretical_records - nrow(df))
+  )
   
-  explicit_nas <- sum(is.na(df$precip)) 
-  missing_rows <- max(0, theoretical_records - nrow(df))
-  total_missing_data_points <- explicit_nas + missing_rows
-  calculated_missing_pct <- (total_missing_data_points / theoretical_records) * 100
-  
-  
-  
-  
-  Base_time_chunks_per_hour <- 4
+  return(list(data = df, metadata = metadata))
+}
+
+aggregate_time_scales <- function(df, all_k) {
   df$precip_rate <- df$precip 
   df$hour_index <- 0:(nrow(df) - 1)
-  
-  
-  
-  all_k<-c(1:12,24,24*2,24*3,24*4,24*5,24*9,24*10)
-  
-  inspection_list <- list()
-  na_thresholds_list <- list() # To store thresholds for the .rds metadata
-  
-  for (i in seq_along(all_k)) {
-   
-   agg_length <- all_k[i] 
-   scale_name <- paste0("scale_", agg_length, "Hours")
-   
-   # 1. Apply the conditional threshold rule
-   if (agg_length < 6) {
-    max_na_allowed <- 0  # Strict zero-tolerance strictly under 6h
-    
-   } else if (agg_length >= 6 & agg_length <= 12) {
-    max_na_allowed <- 1  # Rule for 6h to 12h (easy to change to 1 later if needed)
-    
-   } else {
-    # Fast rule for larger scales: max 1/3 of the values missing, rounded up
-    max_na_allowed <- ceiling(agg_length / 5)
-    
-    # Safety check: never allow a completely empty bin to pass
-    max_na_allowed <- min(max_na_allowed, agg_length - 1) 
-   }
-   
-   # 2. Store the calculated threshold for your metadata export
-   na_thresholds_list[[scale_name]] <- max_na_allowed
-   
-   # 3. Apply the aggregation
-   df_detailed <- df %>%
-    mutate(bin_id = hour_index %/% agg_length) %>%
-    group_by(bin_id) %>%
-    mutate(
-     hours_in_bin = n(),
-     na_count = sum(is.na(precip_rate)), 
-     
-     # Calculate mean conditionally
-     bin_mean_precip = ifelse(
-      na_count <= max_na_allowed, 
-      mean(precip_rate, na.rm = TRUE),
-      NA_real_                        
-     ),
-     
-     is_valid_bin = (!is.na(bin_mean_precip) & hours_in_bin == agg_length)
-    ) %>%
-    ungroup() %>%
-    select(-na_count) 
-   
-   # Save the dataframe to our list
-   inspection_list[[scale_name]] <- df_detailed
-  }
-  
-  
   clean_bins_list <- list()
-  for (scale_name in names(inspection_list)) {
-   df_detailed <- inspection_list[[scale_name]]
-   valid_bins <- df_detailed %>%
-    filter(is_valid_bin) %>%
-    group_by(bin_id) %>%
-    summarise(
-     agg_date = min(date),
-     bin_mean_precip = first(bin_mean_precip),
-     .groups = "drop"
-    )
-   clean_bins_list[[scale_name]] <- valid_bins
+  
+  for (agg_length in all_k) {
+    scale_name <- paste0("scale_", agg_length, "Hours")
+    
+    if (agg_length < 6) max_na_allowed <- 0 
+    else if (agg_length >= 6 & agg_length <= 12) max_na_allowed <- 1
+    else max_na_allowed <- min(ceiling(agg_length / 5), agg_length - 1) 
+    
+    valid_bins <- df %>%
+      mutate(bin_id = hour_index %/% agg_length) %>%
+      group_by(bin_id) %>%
+      mutate(
+        hours_in_bin = n(),
+        na_count = sum(is.na(precip_rate)), 
+        bin_mean_precip = ifelse(na_count <= max_na_allowed, mean(precip_rate, na.rm = TRUE), NA_real_),
+        is_valid_bin = (!is.na(bin_mean_precip) & hours_in_bin == agg_length)
+      ) %>%
+      filter(is_valid_bin) %>%
+      summarise(agg_date = min(date), bin_mean_precip = first(bin_mean_precip), .groups = "drop")
+    
+    clean_bins_list[[scale_name]] <- valid_bins
   }
-  
-  
-  
-  
-  
-  scale_na_summary_list <- list()
-  
-  for (scale_name in names(clean_bins_list)) {
-   agg_length <- as.numeric(gsub("[^0-9.]", "", scale_name))
-   theor_bins <- theoretical_records %/% agg_length
-   valid_bins_count <- nrow(clean_bins_list[[scale_name]])
-   dropped_bins <- theor_bins - valid_bins_count
-   dropped_pct <- (dropped_bins / theor_bins) * 100
-   
-   # Retrieve the threshold we stored earlier
-   current_max_na <- na_thresholds_list[[scale_name]]
-   
-   # Store results, now including the dynamic threshold
-   scale_na_summary_list[[scale_name]] <- data.frame(
-    Scale_k_hours = agg_length,
-    Max_NA_Allowed = current_max_na,    # NEW COLUMN ADDED HERE
-    Theoretical_Bins = theor_bins,
-    Valid_Bins = valid_bins_count,
-    Dropped_Bins = dropped_bins,
-    Dropped_Pct = dropped_pct
-   )
-  }
-  
-  # Combine all scales into your final data frame
-  scale_na_summary_df <- bind_rows(scale_na_summary_list)
-  
-  
-  
-  
-  
-  
-  # Create a comprehensive metadata list object
-  station_metadata_obj <- list(
-   General_Info = list(
-    Station = station_name,
-    Start_Datetime = start_ts,
-    End_Datetime = end_ts,
-    Theoretical_Records = theoretical_records,
-    Metadata_Records = metadata_records,
-    Actual_Rows = nrow(df)
-   ),
-   Missing_Data_Summary = list(
-    Explicit_NAs = explicit_nas,
-    Missing_Rows = missing_rows,
-    Total_Missing_Points = total_missing_data_points,
-    Calculated_Missing_Pct = calculated_missing_pct,
-    Metadata_Missing_Pct = metadata_missing_pct
-   ),
-   Scale_Data_Loss = scale_na_summary_df
-  )
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
+  return(clean_bins_list)
+}
+
+compute_scale_statistics <- function(clean_bins_list) {
   summary_stats_list <- list()
+  
   for (scale_name in names(clean_bins_list)) {
-   df_clean <- clean_bins_list[[scale_name]]
-   x_all <- df_clean$bin_mean_precip
-   x_pos <- x_all[x_all > 0]
-   
-   p_zero <- sum(x_all == 0) / length(x_all)
-   mean_all <- mean(x_all, na.rm = TRUE)
-   var_all  <- var(x_all, na.rm = TRUE)
-   mean_pos <- ifelse(length(x_pos) > 0, mean(x_pos, na.rm = TRUE), NA)
-   var_pos  <- ifelse(length(x_pos) > 1, var(x_pos, na.rm = TRUE), NA)
-   
-   if (length(x_all) >= 4) {
-    lm_all <- lmoms(x_all)
-    l1_all <- lm_all$lambdas[1]
-    l2_all <- lm_all$lambdas[2]
-    l3_all <- lm_all$lambdas[3]
-    t2_all <- lm_all$ratios[2]
-    t3_all <- lm_all$ratios[3]
-    t4_all <- lm_all$ratios[4]
-   } else {
-    l1_all <- l2_all <- l3_all <- t1_all <- t2_all <- t3_all <- t4_all <- NA
-   }
-   
-   if (length(x_pos) >= 4) {
-    lm_pos <- lmoms(x_pos)
-    l1_pos <- lm_pos$lambdas[1]
-    l2_pos <- lm_pos$lambdas[2]
-    l3_pos <- lm_pos$lambdas[3]
-    t2_pos <- lm_pos$ratios[2]
-    t3_pos <- lm_pos$ratios[3]
-    t4_pos <- lm_pos$ratios[4]
-   } else {
-    l1_pos <- l2_pos <- l3_pos <- t1_pos <- t2_pos <- t3_pos <- t4_pos <- NA
-   }
-   
-   scale_summary <- data.frame(
-    scale = scale_name, p_zero = p_zero,
-    mean_all = mean_all, var_all = var_all,
-    l1_all = l1_all, l2_all = l2_all, l3_all = l3_all, t2_all = t2_all, t3_all = t3_all, t4_all = t4_all,
-    mean_pos = mean_pos, var_pos = var_pos,
-    l1_pos = l1_pos, l2_pos = l2_pos, l3_pos = l3_pos, t2_pos = t2_pos, t3_pos = t3_pos, t4_pos = t4_pos
-   )
-   summary_stats_list[[scale_name]] <- scale_summary
+    x_all <- clean_bins_list[[scale_name]]$bin_mean_precip
+    x_pos <- x_all[x_all > 0]
+    
+    p_zero <- sum(x_all == 0) / length(x_all)
+    
+    get_lmoms <- function(x) {
+      if (length(x) >= 4) {
+        lm <- lmoms(x)
+        return(c(lm$lambdas[1:3], lm$ratios[2:4]))
+      } else {
+        return(rep(NA, 6))
+      }
+    }
+    
+    lm_all <- get_lmoms(x_all)
+    lm_pos <- get_lmoms(x_pos)
+    
+    summary_stats_list[[scale_name]] <- data.frame(
+      scale = scale_name, p_zero = p_zero,
+      mean_all = mean(x_all, na.rm = TRUE), var_all = var(x_all, na.rm = TRUE),
+      l1_all = lm_all[1], l2_all = lm_all[2], l3_all = lm_all[3], 
+      t2_all = lm_all[4], t3_all = lm_all[5], t4_all = lm_all[6],
+      mean_pos = ifelse(length(x_pos) > 0, mean(x_pos, na.rm = TRUE), NA), 
+      var_pos = ifelse(length(x_pos) > 1, var(x_pos, na.rm = TRUE), NA),
+      l1_pos = lm_pos[1], l2_pos = lm_pos[2], l3_pos = lm_pos[3], 
+      t2_pos = lm_pos[4], t3_pos = lm_pos[5], t4_pos = lm_pos[6]
+    )
   }
+  return(bind_rows(summary_stats_list) %>% mutate(k_hours = as.numeric(gsub("[^0-9.]", "", scale))))
+}
+
+# ---------------------------------------------------------------------
+# 5. MODEL FITTING (DEoptim)
+# ---------------------------------------------------------------------
+run_optimization <- function(model_name, loss_func, lower_bounds, upper_bounds, k_obs, y_obs, k_star, q_k_star, de_ctrl, stat_name) {
+  fit_result <- DEoptim(fn = loss_func, lower = lower_bounds, upper = upper_bounds, k = k_obs, y = y_obs, k_star = k_star, q_k_star = q_k_star, control = de_ctrl)
   
-  final_summary_df <- bind_rows(summary_stats_list)
+  best_params <- fit_result$optim$bestmem
+  is_1p <- grepl("1p", model_name)
+  is_weibull <- grepl("Weibull", model_name)
   
-  # --- Filter Data & Optimize ---
-  final_summary_df <- final_summary_df %>%
-   mutate(k_hours = as.numeric(gsub("[^0-9.]", "", scale)))
-  
-  fit_data <- final_summary_df %>% 
-   filter(k_hours >= 24) %>% 
-   arrange(k_hours)
-  
-  k_obs <- fit_data$k_hours
-  k_star <- 24
-  
-  stats_to_fit <- setdiff(names(fit_data), c(
-   "scale", "k_hours", "mean_all", "var_all", "l1_all", "l2_all", "l3_all",
-   "mean_pos", "var_pos", "l1_pos", "l2_pos", "l3_pos"
+  return(data.frame(
+    Statistic = stat_name, Model = model_name,
+    H0 = if (is_1p) 1 else best_params[1],
+    Param_a = if (is_weibull) (if (is_1p) best_params[1] else best_params[2]) else NA,
+    Param_b = if (!is_weibull) (if (is_1p) best_params[1] else best_params[2]) else NA,
+    MSE = fit_result$optim$bestval
   ))
+}
+
+fit_scaling_models <- function(final_summary_df, APP_CONFIG) {
+  k_star <- APP_CONFIG$parameters$k_star
+  de_ctrl <- APP_CONFIG$deoptim_ctrl
+  max_H0 <- APP_CONFIG$parameters$max_H0
+  
+  fit_data <- final_summary_df %>% filter(k_hours >= k_star) %>% arrange(k_hours)
+  
+  # EXCLUDE t_pos from DEoptim fitting
+  cols_to_exclude <- c("scale", "k_hours", "mean_all", "var_all", "l1_all", "l2_all", "l3_all", "mean_pos", "var_pos", "l1_pos", "l2_pos", "l3_pos", "t2_pos", "t3_pos", "t4_pos")
+  stats_to_fit <- setdiff(names(fit_data), cols_to_exclude)
   
   all_fits_list <- list()
-  de_ctrl <- DEoptim.control(
-   trace = FALSE, 
-   itermax = 1000,   
-   NP = 50,         
-   reltol = 1e-11,    
-   steptol = 500     
-  )
   
   for (stat in stats_to_fit) {
-   y_obs <- fit_data[[stat]]
-   if(all(is.na(y_obs))) next
-   
-   q_k_star <- fit_data[[stat]][fit_data$k_hours == k_star][1]
-   if(is.na(q_k_star)) next
-   
-   max_H0 <- ifelse(stat == "p_zero", 1, 1)
-   
-   fit_W_2p <- DEoptim(mse_W_2p, lower = c(1e-6, 1e-6), upper = c(max_H0, 1000), 
-                       k = k_obs, y = y_obs, k_star = k_star, q_k_star = q_k_star, control = de_ctrl)
-   
-   fit_L_2p <- DEoptim(mse_L_2p, lower = c(1e-6, 1e-6), upper = c(max_H0, 1000), 
-                       k = k_obs, y = y_obs, k_star = k_star, q_k_star = q_k_star, control = de_ctrl)
-   
-   res_row <- data.frame(
-    Statistic = stat,
-    Model = c("Weibull_2p", "PowerLaw_2p"),
-    H0 = c(fit_W_2p$optim$bestmem[1], fit_L_2p$optim$bestmem[1]),
-    Param_a = c(fit_W_2p$optim$bestmem[2], NA),
-    Param_b = c(NA, fit_L_2p$optim$bestmem[2]),
-    MSE = c(fit_W_2p$optim$bestval, fit_L_2p$optim$bestval)
-   )
-   
-   if (stat == "p_zero") {
-    fit_W_1p <- DEoptim(mse_W_1p, lower = 1e-6, upper = 10, 
-                        k = k_obs, y = y_obs, k_star = k_star, q_k_star = q_k_star, control = de_ctrl)
+    y_obs <- fit_data[[stat]]
+    if(all(is.na(y_obs))) next
+    q_k_star <- fit_data[[stat]][fit_data$k_hours == k_star][1]
+    if(is.na(q_k_star)) next
     
-    fit_L_1p <- DEoptim(mse_L_1p, lower = 1e-6, upper = 10, 
-                        k = k_obs, y = y_obs, k_star = k_star, q_k_star = q_k_star, control = de_ctrl)
-    
-    res_1p <- data.frame(
-     Statistic = stat,
-     Model = c("Weibull_1p", "PowerLaw_1p"),
-     H0 = c(1, 1), 
-     Param_a = c(fit_W_1p$optim$bestmem[1], NA),
-     Param_b = c(NA, fit_L_1p$optim$bestmem[1]),
-     MSE = c(fit_W_1p$optim$bestval, fit_L_1p$optim$bestval)
+    stat_results <- list(
+      run_optimization("Weibull_2p", mse_W_2p, c(1e-6, 1e-6), c(max_H0, 1000), fit_data$k_hours, y_obs, k_star, q_k_star, de_ctrl, stat),
+      run_optimization("PowerLaw_2p", mse_L_2p, c(1e-6, 1e-6), c(max_H0, 1000), fit_data$k_hours, y_obs, k_star, q_k_star, de_ctrl, stat)
     )
-    res_row <- bind_rows(res_row, res_1p)
-   }
-   all_fits_list[[stat]] <- res_row
-  }
-  
-  optimized_parameters_df <- bind_rows(all_fits_list)
-  
-  # --- Evaluate Validation Data ---
-  validation_data <- final_summary_df %>% filter(k_hours < 24) %>% arrange(k_hours)
-  k_val <- validation_data$k_hours
-  empirical_24h <- final_summary_df %>% filter(k_hours == k_star)
-  
-  validation_results_list <- list()
-  for (i in seq_len(nrow(optimized_parameters_df))) {
-   current_fit <- optimized_parameters_df[i, ]
-   stat <- current_fit$Statistic
-   model_type <- current_fit$Model
-   
-   H0_val <- current_fit$H0
-   a_val <- current_fit$Param_a
-   b_val <- current_fit$Param_b
-   
-   actual_vals <- validation_data[[stat]]
-   q_k_star_val <- empirical_24h[[stat]]
-   
-   if (all(is.na(actual_vals))) {
-    current_fit$mse_validation <- NA
-    validation_results_list[[i]] <- current_fit
-    next
-   }
-   
-   predicted_vals <- switch(model_type,
-                            "Weibull_2p"  = H_W_2p(k_val, H0_val, k_star, q_k_star_val, a_val),
-                            "PowerLaw_2p" = H_L_2p(k_val, H0_val, k_star, q_k_star_val, b_val),
-                            "Weibull_1p"  = H_W_1p_pdry(k_val, k_star, q_k_star_val, a_val),
-                            "PowerLaw_1p" = H_L_1p_pdry(k_val, k_star, q_k_star_val, b_val),
-                            rep(NA, length(k_val)))
-   
-   current_fit$mse_validation <- calculate_mse(actual_vals, predicted_vals)
-   validation_results_list[[i]] <- current_fit
-  }
-  
-  final_evaluated_models <- bind_rows(validation_results_list)
-  
-  best_models <- final_evaluated_models %>%
-   group_by(Statistic) %>%
-   slice_min(order_by = mse_validation, n = 1) %>%
-   ungroup()
-  
-  # --- Generate All Predictions ---
-  k_empirical <- sort(unique(final_summary_df$k_hours))
-  k_predict <- c(0.25, k_empirical) 
-  predicted_list <- list()
-  
-  for (stat in unique(optimized_parameters_df$Statistic)) {
-   q_k_star_val <- final_summary_df[[stat]][final_summary_df$k_hours == k_star]
-   actual_vals <- final_summary_df[[stat]][match(k_predict, final_summary_df$k_hours)]
-   params <- optimized_parameters_df %>% filter(Statistic == stat)
-   
-   df_stat <- data.frame(Scale_k = k_predict, Statistic = stat, Actual = actual_vals)
-   
-   for (i in seq_len(nrow(params))) {
-    m_name <- params$Model[i]
-    H0_val <- params$H0[i]
-    a_val <- params$Param_a[i]
-    b_val <- params$Param_b[i]
     
-    predicted_vals <- switch(m_name,
-                             "Weibull_2p"  = H_W_2p(k_predict, H0_val, k_star, q_k_star_val, a_val),
-                             "PowerLaw_2p" = H_L_2p(k_predict, H0_val, k_star, q_k_star_val, b_val),
-                             "Weibull_1p"  = H_W_1p_pdry(k_predict, k_star, q_k_star_val, a_val),
-                             "PowerLaw_1p" = H_L_1p_pdry(k_predict, k_star, q_k_star_val, b_val),
-                             rep(NA, length(k_predict)))
-    df_stat[[m_name]] <- predicted_vals
-   }
-   predicted_list[[stat]] <- df_stat
+    if (stat == "p_zero") {
+      stat_results <- append(stat_results, list(
+        run_optimization("Weibull_1p", mse_W_1p, 1e-6, 10, fit_data$k_hours, y_obs, k_star, q_k_star, de_ctrl, stat),
+        run_optimization("PowerLaw_1p", mse_L_1p, 1e-6, 10, fit_data$k_hours, y_obs, k_star, q_k_star, de_ctrl, stat)
+      ))
+    }
+    all_fits_list[[stat]] <- bind_rows(stat_results)
+  }
+  return(bind_rows(all_fits_list))
+}
+
+# ---------------------------------------------------------------------
+# 6. PREDICTIONS & VALIDATION (Base + Derived Best t_pos)
+# ---------------------------------------------------------------------
+predict_scaling_values <- function(model_name, k_target, k_star, q_k_star, H0, param_a, param_b) {
+  switch(model_name,
+         "Weibull_2p"  = H_W_2p(k_target, H0, k_star, q_k_star, param_a),
+         "PowerLaw_2p" = H_L_2p(k_target, H0, k_star, q_k_star, param_b),
+         "Weibull_1p"  = H_W_1p_pdry(k_target, k_star, q_k_star, param_a),
+         "PowerLaw_1p" = H_L_1p_pdry(k_target, k_star, q_k_star, param_b),
+         rep(NA, length(k_target))
+  )
+}
+
+generate_base_predictions <- function(final_summary_df, optimized_parameters_df, APP_CONFIG, custom_k = NULL) {
+  k_star <- APP_CONFIG$parameters$k_star
+  k_predict <- if (is.null(custom_k)) c(0.25, sort(unique(final_summary_df$k_hours))) else custom_k 
+  
+  predicted_list <- list()
+  for (stat in unique(optimized_parameters_df$Statistic)) {
+    q_k_star_val <- final_summary_df[[stat]][final_summary_df$k_hours == k_star]
+    df_stat <- data.frame(Scale_k = k_predict, Statistic = stat, Actual = final_summary_df[[stat]][match(k_predict, final_summary_df$k_hours)])
+    params <- optimized_parameters_df %>% filter(Statistic == stat)
+    
+    for (i in seq_len(nrow(params))) {
+      df_stat[[params$Model[i]]] <- predict_scaling_values(params$Model[i], k_predict, k_star, q_k_star_val, params$H0[i], params$Param_a[i], params$Param_b[i])
+    }
+    predicted_list[[stat]] <- df_stat
+  }
+  return(bind_rows(predicted_list))
+}
+
+derive_tpos_predictions <- function(final_summary_df, base_preds_df, best_models_df, custom_k = NULL) {
+  k_predict <- if (is.null(custom_k)) c(0.25, sort(unique(final_summary_df$k_hours))) else custom_k 
+  
+  get_best_curve <- function(stat_name) {
+    best_mod <- best_models_df$Model[best_models_df$Statistic == stat_name][1]
+    if (is.na(best_mod)) return(rep(NA, length(k_predict)))
+    stat_df <- base_preds_df %>% filter(Statistic == stat_name)
+    if (nrow(stat_df) > 0 && best_mod %in% names(stat_df)) return(stat_df[[best_mod]])
+    return(rep(NA, length(k_predict)))
   }
   
-  all_predictions_df <- bind_rows(predicted_list)
+  p0_curve <- get_best_curve("p_zero")
+  t2_all_curve <- get_best_curve("t2_all")
+  t3_all_curve <- get_best_curve("t3_all")
+  t4_all_curve <- get_best_curve("t4_all")
   
+  res_list <- list()
   
-  # =====================================================================
-  # EXPORT STATION RESULTS 
-  # =====================================================================
-  station_folder <- file.path(individual_dir, station_name)
+  if (!all(is.na(p0_curve)) && !all(is.na(t2_all_curve))) {
+    df_t2 <- data.frame(Scale_k = k_predict, Statistic = "t2_pos", Actual = final_summary_df$t2_pos[match(k_predict, final_summary_df$k_hours)])
+    df_t2$Calculated_Best <- calc_t2_pos(p0_curve, t2_all_curve)
+    res_list[["t2_pos"]] <- df_t2
+  }
+  if (!all(is.na(p0_curve)) && !all(is.na(t2_all_curve)) && !all(is.na(t3_all_curve))) {
+    df_t3 <- data.frame(Scale_k = k_predict, Statistic = "t3_pos", Actual = final_summary_df$t3_pos[match(k_predict, final_summary_df$k_hours)])
+    df_t3$Calculated_Best <- calc_t3_pos(p0_curve, t2_all_curve, t3_all_curve)
+    res_list[["t3_pos"]] <- df_t3
+  }
+  if (!all(is.na(p0_curve)) && !all(is.na(t2_all_curve)) && !all(is.na(t3_all_curve)) && !all(is.na(t4_all_curve))) {
+    df_t4 <- data.frame(Scale_k = k_predict, Statistic = "t4_pos", Actual = final_summary_df$t4_pos[match(k_predict, final_summary_df$k_hours)])
+    df_t4$Calculated_Best <- calc_t4_pos(p0_curve, t2_all_curve, t3_all_curve, t4_all_curve)
+    res_list[["t4_pos"]] <- df_t4
+  }
+  return(bind_rows(res_list))
+}
+
+evaluate_models <- function(predictions_df, optimized_parameters_df, APP_CONFIG) {
+  val_preds <- predictions_df %>% filter(Scale_k < APP_CONFIG$parameters$k_star)
+  eval_results <- list()
+  available_models <- setdiff(names(predictions_df), c("Scale_k", "Statistic", "Actual", "Data_Type"))
+  
+  for (stat in unique(val_preds$Statistic)) {
+    stat_data <- val_preds %>% filter(Statistic == stat)
+    if (all(is.na(stat_data$Actual))) next
+    
+    for (mod in available_models) {
+      if (mod %in% names(stat_data) && !all(is.na(stat_data[[mod]]))) {
+        mse_val <- calculate_mse(stat_data$Actual, stat_data[[mod]])
+        orig_param <- optimized_parameters_df %>% filter(Statistic == stat, Model == mod)
+        
+        eval_results[[length(eval_results) + 1]] <- data.frame(
+          Statistic = stat, Model = mod,
+          H0 = if(nrow(orig_param) > 0) orig_param$H0[1] else NA,
+          Param_a = if(nrow(orig_param) > 0) orig_param$Param_a[1] else NA,
+          Param_b = if(nrow(orig_param) > 0) orig_param$Param_b[1] else NA,
+          MSE_Calibration = if(nrow(orig_param) > 0) orig_param$MSE[1] else NA,
+          mse_validation = mse_val
+        )
+      }
+    }
+  }
+  evaluated_df <- bind_rows(eval_results)
+  best_df <- evaluated_df %>% group_by(Statistic) %>% slice_min(order_by = mse_validation, n = 1, with_ties = FALSE) %>% ungroup()
+  return(list(evaluated = evaluated_df, best = best_df))
+}
+
+# ---------------------------------------------------------------------
+# 7. PLOTTING FUNCTIONS
+# ---------------------------------------------------------------------
+plot_statistic_dynamic <- function(stat_name, final_summary_df, smooth_preds_df, APP_CONFIG, y_label = stat_name, show_legend = FALSE, fixed_y = TRUE) {
+  emp_data <- final_summary_df %>% select(k_hours, value = !!sym(stat_name)) %>% filter(!is.na(value)) %>% mutate(Data_Type = ifelse(k_hours >= APP_CONFIG$parameters$k_star, "Calib. data", "Valid. data"))
+  if(nrow(emp_data) == 0) return(NULL)
+  
+  df_stat_smooth <- smooth_preds_df %>% filter(Statistic == stat_name)
+  if(nrow(df_stat_smooth) == 0) return(NULL)
+  
+  existing_models <- intersect(c(APP_CONFIG$parameters$global_expected_models, "Calculated_Best"), names(df_stat_smooth))
+  smooth_long <- df_stat_smooth %>% select(Scale_k, all_of(existing_models)) %>% pivot_longer(cols = all_of(existing_models), names_to = "Model", values_to = "value") %>% filter(!is.na(value))
+  
+  global_colors <- c("Weibull_1p" = "blue", "PowerLaw_1p" = "red", "Weibull_2p" = "blue", "PowerLaw_2p" = "red", "Calculated_Best" = "darkgreen")
+  global_lines  <- c("Weibull_1p" = "solid", "PowerLaw_1p" = "solid", "Weibull_2p" = "dashed", "PowerLaw_2p" = "dashed", "Calculated_Best" = "solid")
+  custom_breaks <- c(1, 6, 12, 24, 120, 240); custom_breaks <- custom_breaks[custom_breaks <= max(emp_data$k_hours, na.rm=TRUE)] 
+  
+  p <- ggplot() +
+    geom_line(data = smooth_long, aes(x = Scale_k, y = value, color = Model, linetype = Model), linewidth = 1) +
+    geom_point(data = emp_data, aes(x = k_hours, y = value, fill = Data_Type), shape = 21, color = "white", size = 3, stroke = 0.5) +
+    geom_vline(xintercept = APP_CONFIG$parameters$k_star, linetype = "dashed", color = "darkgray", linewidth = 0.8) +
+    scale_x_log10(breaks = custom_breaks, labels = custom_breaks) +
+    scale_fill_manual(name = "", values = c("Calib. data" = "black", "Valid. data" = "orange")) +
+    scale_color_manual(name = "", values = global_colors) +
+    scale_linetype_manual(name = "", values = global_lines) +
+    labs(x = "Temporal scale, k [h]", y = y_label) + theme_bw() + theme(legend.position = if(show_legend) "bottom" else "none")
+  
+  if (fixed_y) p <- p + scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.2))
+  return(p)
+}
+
+plot_discrete_points <- function(stat_name, preds_df, APP_CONFIG, y_label = stat_name, show_legend = TRUE, fixed_y = TRUE) {
+  df_stat <- preds_df %>% filter(Statistic == stat_name)
+  if(nrow(df_stat) == 0) return(NULL)
+  
+  existing_models <- intersect(c(APP_CONFIG$parameters$global_expected_models, "Calculated_Best"), names(df_stat))
+  cols_to_gather <- c("Actual", existing_models)
+  df_long <- df_stat %>% select(Scale_k, all_of(cols_to_gather)) %>% pivot_longer(cols = all_of(cols_to_gather), names_to = "Series", values_to = "value") %>% filter(!is.na(value))
+  
+  my_colors <- c("Actual" = "black", "Weibull_1p" = "blue", "PowerLaw_1p" = "red", "Weibull_2p" = "blue", "PowerLaw_2p" = "red", "Calculated_Best" = "darkgreen")
+  my_shapes <- c("Actual" = 16, "Weibull_1p" = 17, "PowerLaw_1p" = 15, "Weibull_2p" = 17, "PowerLaw_2p" = 15, "Calculated_Best" = 18)
+  
+  custom_breaks <- c(1, 6, 12, 24, 120, 240); custom_breaks <- custom_breaks[custom_breaks <= max(df_stat$Scale_k, na.rm = TRUE)]
+  
+  p <- ggplot(df_long, aes(x = Scale_k, y = value, color = Series, shape = Series)) +
+    geom_point(size = 3.5, alpha = 0.8) +
+    geom_vline(xintercept = APP_CONFIG$parameters$k_star, linetype = "dashed", color = "darkgray", linewidth = 0.8) +
+    scale_x_log10(breaks = custom_breaks, labels = custom_breaks) +
+    scale_color_manual(values = my_colors) + scale_shape_manual(values = my_shapes) +
+    labs(x = "Temporal scale, k [h]", y = y_label) + theme_bw() + theme(legend.position = if(show_legend) "bottom" else "none", legend.title = element_blank())
+  
+  if (fixed_y) p <- p + scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.2))
+  return(p)
+}
+
+plot_qq_dynamic <- function(stat_name, all_predictions_df, y_label = stat_name) {
+  df_stat <- all_predictions_df %>% filter(Statistic == stat_name, !is.na(Actual)) %>% mutate(Data_Type = ifelse(Scale_k >= 24, "Calib. data", "Valid. data"))
+  if(nrow(df_stat) == 0) return(NULL)
+  
+  model_cols <- setdiff(names(df_stat), c("Scale_k", "Statistic", "Actual", "Data_Type"))
+  df_long <- df_stat %>% pivot_longer(cols = all_of(model_cols), names_to = "Model", values_to = "Predicted") %>% filter(!is.na(Predicted))
+  if(nrow(df_long) == 0) return(NULL)
+  
+  min_val <- min(c(df_long$Actual, df_long$Predicted), na.rm = TRUE)
+  max_val <- max(c(df_long$Actual, df_long$Predicted), na.rm = TRUE)
+  buffer <- max(0.05, (max_val - min_val) * 0.05)
+  
+  p <- ggplot(df_long, aes(x = Actual, y = Predicted)) +
+    geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "darkgray", linewidth = 0.8) +
+    geom_point(aes(fill = Data_Type), shape = 21, color = "white", size = 2.5, stroke = 0.5) +
+    facet_wrap(~ Model) + coord_fixed(ratio = 1) + 
+    scale_fill_manual(name = "", values = c("Calib. data" = "black", "Valid. data" = "orange")) +
+    scale_x_continuous(limits = c(min_val - buffer, max_val + buffer)) +
+    scale_y_continuous(limits = c(min_val - buffer, max_val + buffer)) +
+    labs(title = paste("Empirical vs Predicted:", y_label), x = paste("Empirical (Actual)", y_label), y = paste("Predicted", y_label)) +
+    theme_bw() + theme(panel.grid.major = element_line(linetype = "dotted", color = "lightgray"), panel.grid.minor = element_blank(), strip.background = element_rect(fill = "whitesmoke"), strip.text = element_text(face = "bold"), legend.position = "bottom")
+  return(p)
+}
+
+# ---------------------------------------------------------------------
+# 8. I/O MANAGER (Saving Data & Plots)
+# ---------------------------------------------------------------------
+save_station_data <- function(station_folder, df_list) {
   dir.create(station_folder, recursive = TRUE, showWarnings = FALSE)
+  saveRDS(df_list$final_summary, file.path(station_folder, "final_summary.rds"))
+  saveRDS(df_list$optimized_params, file.path(station_folder, "optimized_parameters.rds"))
+  saveRDS(df_list$eval_results$evaluated, file.path(station_folder, "final_evaluated_models.rds"))
+  saveRDS(df_list$eval_results$best, file.path(station_folder, "best_models.rds"))
+  saveRDS(df_list$predictions, file.path(station_folder, "all_predictions.rds"))
+  saveRDS(df_list$metadata, file.path(station_folder, "extra_metadata.rds"))
+}
+
+save_station_plots <- function(station_folder, summary_df, smooth_preds_df, preds_df, APP_CONFIG) {
+  dir.create(station_folder, recursive = TRUE, showWarnings = FALSE)
+  stats_all <- c("p_zero", "t2_all", "t3_all", "t4_all")
+  stats_pos <- c("t2_pos", "t3_pos", "t4_pos")
   
-  saveRDS(final_summary_df, file.path(station_folder, "final_summary.rds"))
-  saveRDS(optimized_parameters_df, file.path(station_folder, "optimized_parameters.rds"))
-  saveRDS(final_evaluated_models, file.path(station_folder, "final_evaluated_models.rds"))
-  saveRDS(best_models, file.path(station_folder, "best_models.rds"))
-  saveRDS(all_predictions_df, file.path(station_folder, "all_predictions.rds"))
-  saveRDS(station_metadata_obj, file.path(station_folder,"extra_metadata.rds"))
-  
-  
-  
-  # 1. Fixed Y-Axis Plots (0 to 1)
-  plot_p_zero_fixed <- plot_statistic_dynamic("p_zero", y_label = expression(p[0]^{(k)}), show_legend = TRUE, fixed_y = TRUE)
-  plot_t2_fixed     <- plot_statistic_dynamic("t2_pos", y_label = expression(t[2]^{(k)}), fixed_y = TRUE)
-  plot_t3_fixed     <- plot_statistic_dynamic("t3_pos", y_label = expression(t[3]^{(k)}), fixed_y = TRUE)
-  plot_t4_fixed     <- plot_statistic_dynamic("t4_pos", y_label = expression(t[4]^{(k)}), fixed_y = TRUE)
-  
-  
-  
-  # Check if plots generated successfully before combining
-  if (!is.null(plot_p_zero_fixed)) {
-   combined_plot_fixed <- (plot_p_zero_fixed | plot_t2_fixed) / (plot_t3_fixed | plot_t4_fixed) + 
-    plot_layout(guides = "collect") & 
-    theme(legend.position = "bottom", legend.box = "horizontal", legend.box.just = "left", legend.spacing.x = unit(0.5, "cm"))
-   
-   # Export Fixed Plot
-   ggsave(file.path(station_folder, "scaling_plots_fixed.png"), combined_plot_fixed, width = 10, height = 8, bg = "white")
+  for (stat in stats_all) {
+    p_fixed <- plot_statistic_dynamic(stat, summary_df, smooth_preds_df, APP_CONFIG, y_label = stat, show_legend = TRUE, fixed_y = TRUE)
+    if (!is.null(p_fixed)) ggsave(file.path(station_folder, paste0(stat, "_scaling.png")), p_fixed + ggtitle(paste("Scaling Curve (Overall Process):", stat)), width = 8, height = 6, bg = "white")
   }
   
-  # 2. Dynamic Y-Axis Plots (Unconstrained)
-  plot_p_zero_dyn <- plot_statistic_dynamic("p_zero", y_label = expression(p[0]^{(k)}), show_legend = TRUE, fixed_y = FALSE)
-  plot_t2_dyn     <- plot_statistic_dynamic("t2_pos", y_label = expression(t[2]^{(k)}), fixed_y = FALSE)
-  plot_t3_dyn     <- plot_statistic_dynamic("t3_pos", y_label = expression(t[3]^{(k)}), fixed_y = FALSE)
-  plot_t4_dyn     <- plot_statistic_dynamic("t4_pos", y_label = expression(t[4]^{(k)}), fixed_y = FALSE)
-  
-  if (!is.null(plot_p_zero_dyn)) {
-   combined_plot_dynamic <- (plot_p_zero_dyn | plot_t2_dyn) / (plot_t3_dyn | plot_t4_dyn) + 
-    plot_layout(guides = "collect") & 
-    theme(legend.position = "bottom", legend.box = "horizontal", legend.box.just = "left", legend.spacing.x = unit(0.5, "cm"))
-   
-   # Export Dynamic Plot
-   ggsave(file.path(station_folder, "scaling_plots_dynamic.png"), combined_plot_dynamic, width = 10, height = 8, bg = "white")
+  for (stat in stats_pos) {
+    p_fixed <- plot_discrete_points(stat, preds_df, APP_CONFIG, y_label = stat, show_legend = TRUE, fixed_y = TRUE)
+    if (!is.null(p_fixed)) ggsave(file.path(station_folder, paste0(stat, "_scaling.png")), p_fixed + ggtitle(paste("Scaling Scatter (Positive Process):", stat)), width = 8, height = 6, bg = "white")
   }
   
-  
-  
-  # =====================================================================
-  # 4. GENERATE EMPIRICAL VS PREDICTED (Q-Q) SCATTER PLOTS
-  # =====================================================================
-  
-  qq_p_zero <- plot_qq_dynamic("p_zero", y_label = expression(p[0]^{(k)}))
-  qq_t2     <- plot_qq_dynamic("t2_pos", y_label = expression(t[2]^{(k)}))
-  qq_t3     <- plot_qq_dynamic("t3_pos", y_label = expression(t[3]^{(k)}))
-  qq_t4     <- plot_qq_dynamic("t4_pos", y_label = expression(t[4]^{(k)}))
-  
-  # Combine them into one big grid using patchwork
-  # We use wrap_plots to handle any NULLs safely if a stat failed to compute
-  qq_list <- list(qq_p_zero, qq_t2, qq_t3, qq_t4)
-  qq_list <- qq_list[!sapply(qq_list, is.null)] # Remove empty plots
-  
-  if(length(qq_list) > 0) {
-   combined_qq_plots <- wrap_plots(qq_list, ncol = 2) + 
-    plot_layout(guides = "collect") & 
-    theme(legend.position = "bottom")
-   
-   # Save the huge validation grid
-   ggsave(file.path(station_folder, "qq_validation_plots.png"), 
-          combined_qq_plots, width = 12, height = 10, bg = "white")
+  for (stat in stats_pos) {
+    p_qq <- plot_qq_dynamic(stat, preds_df, y_label = stat)
+    if (!is.null(p_qq)) ggsave(file.path(station_folder, paste0(stat, "_qq_validation.png")), p_qq + labs(title = paste("Positive Process (Calculated vs Empirical):", stat), x = paste("Empirical Actual", stat), y = paste("Calculated_Best", stat)), width = 10, height = 8, bg = "white")
   }
   
-  
-  
-  
-  
-  
-  
-  cat("Successfully exported results and plots for:", station_name, "\n")
-  
- }, error = function(e) {
-  
-  # This block ONLY executes if an error occurs in the code above
-  # It prints a warning to the console and gracefully continues to the next file
-  message("--------------------------------------------------")
-  message("FAILED: Station ", station_name, " encountered an error.")
-  message("Error detail: ", conditionMessage(e))
-  message("Skipping to the next station...")
-  message("--------------------------------------------------")
-  
- }) 
- 
-} # End of the main station loop
+  for (stat in stats_all) {
+    p_qq_all <- plot_qq_dynamic(stat, preds_df, y_label = stat)
+    if (!is.null(p_qq_all)) ggsave(file.path(station_folder, paste0(stat, "_qq_validation.png")), p_qq_all + labs(title = paste("Overall Process (Fitted vs Empirical):", stat), x = paste("Empirical Actual", stat), y = paste("DEoptim Fitted", stat)), width = 10, height = 8, bg = "white")
+  }
+}
 
 
+# =====================================================================
+# PART A: HIGH-SPEED PROCESSING LOOP (DATA ONLY)
+# =====================================================================
+# Run this block to churn through all your text files incredibly fast.
+
+station_files <- list.files(path = APP_CONFIG$paths$data_dir, pattern = "\\.txt$", full.names = TRUE)
+
+for (file in station_files) {
+  station_name <- tools::file_path_sans_ext(basename(file))
+  station_folder <- file.path(APP_CONFIG$paths$export_dir, station_name)
+  
+  tryCatch({
+    raw_data <- load_station_data(file)
+    clean_bins <- aggregate_time_scales(raw_data$data, APP_CONFIG$parameters$all_k)
+    summary_df <- compute_scale_statistics(clean_bins)
+    
+    params_df <- fit_scaling_models(summary_df, APP_CONFIG)
+    
+    base_preds <- generate_base_predictions(summary_df, params_df, APP_CONFIG)
+    base_eval  <- evaluate_models(base_preds, params_df, APP_CONFIG)
+    
+    tpos_preds <- derive_tpos_predictions(summary_df, base_preds, base_eval$best)
+    tpos_eval  <- evaluate_models(tpos_preds, params_df, APP_CONFIG)
+    
+    preds_df <- bind_rows(base_preds, tpos_preds)
+    eval_res <- list(
+      evaluated = bind_rows(base_eval$evaluated, tpos_eval$evaluated),
+      best      = bind_rows(base_eval$best, tpos_eval$best)
+    )
+    
+    data_to_save <- list(
+      final_summary = summary_df, optimized_params = params_df, 
+      eval_results = eval_res, predictions = preds_df, metadata = raw_data$metadata
+    )
+    
+    save_station_data(station_folder, data_to_save)
+    cat("Successfully processed data for:", station_name, "\n")
+    
+  }, error = function(e) {
+    message("FAILED: Station ", station_name, " encountered an error. Detail: ", conditionMessage(e))
+  })
+}
 
 
+# =====================================================================
+# PART B: ON-DEMAND PLOTTER
+# =====================================================================
+# Run this block separately whenever you want to generate images for a station.
 
+target_station <- "Station_001"   # <--- TYPE YOUR STATION NAME HERE
 
+station_folder <- file.path(APP_CONFIG$paths$export_dir, target_station)
 
-
-
+if (dir.exists(station_folder)) {
+  summary_df <- readRDS(file.path(station_folder, "final_summary.rds"))
+  params_df  <- readRDS(file.path(station_folder, "optimized_parameters.rds"))
+  preds_df   <- readRDS(file.path(station_folder, "all_predictions.rds"))
+  best_df    <- readRDS(file.path(station_folder, "best_models.rds"))
+  
+  k_smooth <- exp(seq(log(1), log(max(summary_df$k_hours, na.rm=TRUE)), length.out = 500))
+  
+  base_smooth <- generate_base_predictions(summary_df, params_df, APP_CONFIG, custom_k = k_smooth)
+  tpos_smooth <- derive_tpos_predictions(summary_df, base_smooth, best_df, custom_k = k_smooth)
+  smooth_preds_df <- bind_rows(base_smooth, tpos_smooth)
+  
+  save_station_plots(station_folder, summary_df, smooth_preds_df, preds_df, APP_CONFIG)
+  cat("Done! Plots for", target_station, "are saved in", station_folder, "\n")
+} else {
+  message("Skipping plotting. Folder not found for station: ", target_station)
+}

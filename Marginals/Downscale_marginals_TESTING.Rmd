@@ -126,33 +126,3 @@ validation_df$t4_diff <- t4_all - t4_calc
 ```
 
 
-
-```{r}
-# Load the necessary libraries
-library(ggplot2)
-library(tidyr)
-library(dplyr)
-
-# 1. Select the relevant columns and reshape the data to "long" format
-stn_data_long <- stn_data %>%
-  select(k_hours, p_zero, t2_pos, t3_pos, t4_pos, t2_all, t3_all, t4_all) %>%
-  pivot_longer(
-    cols = -k_hours,        # Keep k_hours as the X-axis reference
-    names_to = "Variable",  # The new column containing your variable names
-    values_to = "Value"     # The new column containing the actual numbers
-  )
-
-# 2. Plot the data
-ggplot(stn_data_long, aes(x = k_hours, y = Value, color = Variable)) +
-  geom_line(linewidth = 1) +
-  theme_minimal() +
-  labs(
-    title = "Metrics for Station DE_00020",
-    x = "Hours (k_seq)",
-    y = "Value",
-    color = "Metric"
-  )
-```
-
-
-
