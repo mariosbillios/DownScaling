@@ -398,13 +398,17 @@ ggplot(data = derived_l_moments_new) +
   geom_point(aes(x = Scale_k, y = Actual_t2_pos, color = "Actual t2_pos"),
              shape = 3, size = 3, stroke = 1, alpha = 0.8, na.rm = TRUE) +
 
+  geom_point(aes(x = Scale_k, y = derived_Actual_t2_pos, color = "Derived_Actual_t2_pos"),
+             shape = 4, size = 3, stroke = 1, alpha = 0.8, na.rm = TRUE) +
+ 
   scale_color_manual(
     name = "Legend",
-    breaks = c("Predicted t2_pos", "Actual t2_pos", "Derived Pred t2_pos"),
+    breaks = c("Predicted t2_pos", "Actual t2_pos", "Derived Pred t2_pos", "Derived_Actual_t2_pos"),
     values = c(
       "Predicted t2_pos" = "blue",
       "Actual t2_pos" = "black",
-      "Derived Pred t2_pos" = "red"
+      "Derived Pred t2_pos" = "red",
+      "Derived_Actual_t2_pos" = "orange"
     )
   ) +
 
