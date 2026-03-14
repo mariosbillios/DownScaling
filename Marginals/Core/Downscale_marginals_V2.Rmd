@@ -1,0 +1,683 @@
+
+```{r}
+library(data.table)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(DEoptim)
+library(lmomco)
+
+# =====================================================================
+# 1. MATHEMATICAL & OBJECTIVE FUNCTIONS
+# =====================================================================
+
+H_W_2p <- function(k, H0, k_star, q_k_star, a) {
+ power_exponent <- (k / k_star)^a
+ base_fraction <- q_k_star / H0
+ H0 * (base_fraction ^ power_exponent)
+}
+
+H_L_2p <- function(k, H0, k_star, q_k_star, b) {
+ ln_numerator <- log(1 + b * k)
+ ln_denominator <- log(1 + b * k_star)
+ power_exponent <- ln_numerator / ln_denominator
+ base_fraction <- q_k_star / H0
+ H0 * (base_fraction ^ power_exponent)
+}
+
+H_W_1p_pdry <- function(k, k_star, q_k_star, a) {
+ H0 <- 0.99
+ power_exponent <- (k / k_star)^a
+ base_fraction <- q_k_star / H0
+ H0 * (base_fraction ^ power_exponent)
+}
+
+H_L_1p_pdry <- function(k, k_star, q_k_star, b) {
+ H0 <- 0.99
+ ln_numerator <- log(1 + b * k)
+ ln_denominator <- log(1 + b * k_star)
+ power_exponent <- ln_numerator / ln_denominator
+ base_fraction <- q_k_star / H0
+ H0 * (base_fraction ^ power_exponent)
+}
+
+# --- FITTING FUNCTIONS (MSE) ---
+mse_W_2p <- function(par, k, y, k_star, q_k_star) mean((y - H_W_2p(k, par[1], k_star, q_k_star, par[2]))^2, na.rm=TRUE)
+mse_L_2p <- function(par, k, y, k_star, q_k_star) mean((y - H_L_2p(k, par[1], k_star, q_k_star, par[2]))^2, na.rm=TRUE)
+mse_W_1p <- function(par, k, y, k_star, q_k_star) mean((y - H_W_1p_pdry(k, k_star, q_k_star, par[1]))^2, na.rm=TRUE)
+mse_L_1p <- function(par, k, y, k_star, q_k_star) mean((y - H_L_1p_pdry(k, k_star, q_k_star, par[1]))^2, na.rm=TRUE)
+
+# --- VALIDATION FUNCTION (SMAPE) ---
+calculate_smape <- function(actual, predicted) {
+ mask <- !is.na(actual) & !is.na(predicted)
+ if (sum(mask) == 0) return(NA)
+ 
+ a <- actual[mask]
+ p <- predicted[mask]
+ 
+ numerator <- abs(p - a)
+ denominator <- (abs(a) + abs(p)) / 2
+ 
+ return(mean(numerator / (denominator + 1e-9)) * 100)
+}
+
+# --- L-MOMENT CONVERSION FUNCTIONS ---
+calc_t2_all <- function(p0, t2_pos) {
+ p1 <- 1 - p0
+ return(p0 + p1 * t2_pos)
+}
+
+calc_t3_all <- function(p0, t2_pos, t3_pos) {
+ p1 <- 1 - p0
+ numerator <- t2_pos * (p1^2) * t3_pos + 3 * p0 * p1 * t2_pos + 2 * (p0^2) - p0
+ denominator <- p0 + p1 * t2_pos
+ return(numerator / denominator)
+}
+
+calc_t4_all <- function(p0, t2_pos, t3_pos, t4_pos) {
+ p1 <- 1 - p0
+ numerator <- p0 * (5 * p0^2 - 5 * p0 + 1) + 
+  3 * p0 * p1 * (3 * p0 - 1) * t2_pos + 
+  5 * p0 * (p1^2) * t2_pos * t3_pos + 
+  (p1^3) * t2_pos * t4_pos
+ denominator <- p0 + p1 * t2_pos
+ return(numerator / denominator)
+}
+
+calc_t2_pos <- function(p0, t2_all) {
+ p1 <- 1 - p0
+ return((t2_all - p0) / p1)
+}
+
+calc_t3_pos <- function(p0, t2_all, t3_all) {
+ p1 <- 1 - p0
+ numerator <- t3_all * t2_all - 3 * p0 * t2_all + (p0^2) + p0
+ denominator <- p1 * (t2_all - p0)
+ return(numerator / denominator)
+}
+
+calc_t4_pos <- function(p0, t2_all, t3_all, t4_all) {
+ p1 <- 1 - p0
+ numerator <- t4_all * t2_all - 
+  5 * p0 * t3_all * t2_all + 
+  3 * p0 * (2 * p0 + 1) * t2_all - 
+  p0 * (p0^2 + 3 * p0 + 1)
+ denominator <- (p1^2) * (t2_all - p0)
+ return(numerator / denominator)
+}
+
+
+# =====================================================================
+# 2. CORE STATION PROCESSING FUNCTION
+# =====================================================================
+
+process_station <- function(current_station_file, individual_dir) {
+ 
+ station_name <- tools::file_path_sans_ext(basename(current_station_file))
+ 
+ tryCatch({
+  # --- 2.1 File Reading ---
+  df <- data.table::fread(current_station_file, skip = 21, col.names = "precip", data.table = FALSE)
+  df$precip[df$precip == -999] <- NA
+  
+  header_lines <- readLines(current_station_file, n = 21)
+  start_date_str <- sub("Start datetime: ", "", grep("^Start datetime:", header_lines, value = TRUE))
+  end_date_str <- sub("End datetime: ", "", grep("^End datetime:", header_lines, value = TRUE))
+  
+  start_ts <- ymd_h(start_date_str)
+  end_ts <- ymd_h(end_date_str)
+  df$date <- seq(start_ts, end_ts, by = "hour")
+  
+  # --- 2.2 Metadata Calculation ---
+  metadata_records <- as.numeric(sub("Number of records: ", "", grep("^Number of records:", header_lines, value = TRUE)))
+  metadata_missing_pct <- as.numeric(sub("Percent missing data: ", "", grep("^Percent missing data:", header_lines, value = TRUE)))
+  
+  theoretical_records <- as.numeric(difftime(end_ts, start_ts, units = "hours")) + 1
+  explicit_nas <- sum(is.na(df$precip)) 
+  missing_rows <- max(0, theoretical_records - nrow(df))
+  total_missing_data_points <- explicit_nas + missing_rows
+  calculated_missing_pct <- (total_missing_data_points / theoretical_records) * 100
+  
+  # --- 2.3 & 2.4 AGGREGATION & L-MOMENTS ---
+  setDT(df)
+  df[, hour_index := 0:(.N - 1)]
+  
+  all_k <- c(1:12, 24, 24*2, 24*3, 24*4, 24*5, 24*9, 24*10)
+  
+  summary_stats_list <- vector("list", length(all_k))
+  scale_na_summary_list <- vector("list", length(all_k))
+  
+  for (i in seq_along(all_k)) {
+   agg_length <- all_k[i]
+   scale_name <- paste0("scale_", agg_length, "Hours")
+   
+   if (agg_length < 6) { max_na <- 0 } 
+   else if (agg_length >= 6 & agg_length <= 12) { max_na <- 1 } 
+   else { max_na <- min(ceiling(agg_length / 5), agg_length - 1) }
+   
+   agg_dt <- df[, .(
+    n_total = .N,
+    n_na = sum(is.na(precip)),
+    sum_precip = sum(precip, na.rm = TRUE)
+   ), by = .(bin_id = hour_index %/% agg_length)]
+   
+   valid_bins <- agg_dt[n_total == agg_length & n_na <= max_na, sum_precip / (n_total - n_na)]
+   
+   theor_bins <- theoretical_records %/% agg_length
+   valid_bins_count <- length(valid_bins)
+   
+   scale_na_summary_list[[i]] <- data.frame(
+    Scale_k_hours = agg_length, Max_NA_Allowed = max_na, Theoretical_Bins = theor_bins,
+    Valid_Bins = valid_bins_count, Dropped_Bins = theor_bins - valid_bins_count,
+    Dropped_Pct = ((theor_bins - valid_bins_count) / theor_bins) * 100
+   )
+   
+   x_all <- valid_bins
+   x_pos <- x_all[x_all > 0]
+   
+   get_lmoms <- function(x) {
+    if (length(x) >= 4) {
+     lm <- tryCatch(lmomco::lmoms(x), error = function(e) list(lambdas = rep(NA, 4), ratios = rep(NA, 6)))
+     return(c(lm$lambdas[1:4], lm$ratios[2:4]))
+    } else {
+     return(rep(NA, 7))
+    }
+   }
+   
+   lm_all <- get_lmoms(x_all)
+   lm_pos <- get_lmoms(x_pos)
+   
+   summary_stats_list[[i]] <- data.frame(
+    scale = scale_name, k_hours = agg_length,
+    p_zero = if(length(x_all) > 0) sum(x_all == 0) / length(x_all) else NA,
+    mean_all = mean(x_all, na.rm = TRUE), var_all = var(x_all, na.rm = TRUE),
+    l1_all = lm_all[1], l2_all = lm_all[2], l3_all = lm_all[3], l4_all = lm_all[4],
+    t2_all = lm_all[5], t3_all = lm_all[6], t4_all = lm_all[7],
+    mean_pos = if(length(x_pos) > 0) mean(x_pos, na.rm = TRUE) else NA,
+    var_pos = if(length(x_pos) > 1) var(x_pos, na.rm = TRUE) else NA,
+    l1_pos = lm_pos[1], l2_pos = lm_pos[2], l3_pos = lm_pos[3], l4_pos = lm_pos[4],
+    t2_pos = lm_pos[5], t3_pos = lm_pos[6], t4_pos = lm_pos[7]
+   )
+  }
+  
+  scale_na_summary_df <- data.table::rbindlist(scale_na_summary_list)
+  final_summary_df <- data.table::rbindlist(summary_stats_list)
+  
+  station_metadata_obj <- list(
+   General_Info = list(Station = station_name, Start_Datetime = start_ts, End_Datetime = end_ts, Theoretical_Records = theoretical_records, Metadata_Records = metadata_records, Actual_Rows = nrow(df)),
+   Missing_Data_Summary = list(Explicit_NAs = explicit_nas, Missing_Rows = missing_rows, Total_Missing_Points = total_missing_data_points, Calculated_Missing_Pct = calculated_missing_pct, Metadata_Missing_Pct = metadata_missing_pct),
+   Scale_Data_Loss = as.data.frame(scale_na_summary_df)
+  )
+  
+  # --- 2.5 DEoptim Model Fitting (USING MSE) ---
+  fit_data <- final_summary_df %>% filter(k_hours >= 24) %>% arrange(k_hours)
+  k_obs <- fit_data$k_hours
+  k_star <- 24
+  
+  stats_to_fit <- setdiff(names(fit_data), c("scale", "k_hours", "mean_all", "var_all", "mean_pos", "var_pos"))
+  de_ctrl <- DEoptim.control(trace = FALSE, itermax = 1000, NP = 50, reltol = 1e-11, steptol = 500)
+  all_fits_list <- list()
+  
+  for (stat in stats_to_fit) {
+   y_obs <- fit_data[[stat]]
+   if (all(is.na(y_obs))) next
+   
+   q_k_star <- fit_data[[stat]][fit_data$k_hours == k_star][1]
+   if (is.na(q_k_star)) next
+   max_H0 <- 1 
+   
+   fit_W_2p <- DEoptim(mse_W_2p, lower = c(1e-6, 1e-6), upper = c(max_H0, 10), k = k_obs, y = y_obs, k_star = k_star, q_k_star = q_k_star, control = de_ctrl)
+   fit_L_2p <- DEoptim(mse_L_2p, lower = c(1e-6, 1e-6), upper = c(max_H0, 10), k = k_obs, y = y_obs, k_star = k_star, q_k_star = q_k_star, control = de_ctrl)
+   
+   res_row <- data.frame(
+    Statistic = stat, 
+    Model = c("Weibull_2p", "PowerLaw_2p"), 
+    H0 = c(fit_W_2p$optim$bestmem[1], fit_L_2p$optim$bestmem[1]), 
+    Param_a = c(fit_W_2p$optim$bestmem[2], NA), 
+    Param_b = c(NA, fit_L_2p$optim$bestmem[2]), 
+    MSE_Fitting = c(fit_W_2p$optim$bestval, fit_L_2p$optim$bestval)
+   )
+   
+   if (stat == "p_zero") {
+    fit_W_1p <- DEoptim(mse_W_1p, lower = 1e-6, upper = 10, k = k_obs, y = y_obs, k_star = k_star, q_k_star = q_k_star, control = de_ctrl)
+    fit_L_1p <- DEoptim(mse_L_1p, lower = 1e-6, upper = 10, k = k_obs, y = y_obs, k_star = k_star, q_k_star = q_k_star, control = de_ctrl)
+    res_1p <- data.frame(
+     Statistic = stat, 
+     Model = c("Weibull_1p", "PowerLaw_1p"), 
+     H0 = c(1, 1), 
+     Param_a = c(fit_W_1p$optim$bestmem[1], NA), 
+     Param_b = c(NA, fit_L_1p$optim$bestmem[1]), 
+     MSE_Fitting = c(fit_W_1p$optim$bestval, fit_L_1p$optim$bestval)
+    )
+    res_row <- bind_rows(res_row, res_1p)
+   }
+   all_fits_list[[stat]] <- res_row
+  }
+  
+  optimized_parameters_df <- bind_rows(all_fits_list)
+  
+  # --- 2.6 Evaluate Validation Data (USING SMAPE) ---
+  validation_data <- final_summary_df %>% filter(k_hours < 24) %>% arrange(k_hours)
+  empirical_24h <- final_summary_df %>% filter(k_hours == k_star)
+  
+  validation_results_list <- lapply(seq_len(nrow(optimized_parameters_df)), function(i) {
+   current_fit <- optimized_parameters_df[i, ]
+   actual_vals <- validation_data[[current_fit$Statistic]]
+   q_k_star_val <- empirical_24h[[current_fit$Statistic]]
+   
+   if (all(is.na(actual_vals))) { current_fit$smape_validation <- NA; return(current_fit) }
+   
+   predicted_vals <- switch(current_fit$Model,
+                            "Weibull_2p"  = H_W_2p(validation_data$k_hours, current_fit$H0, k_star, q_k_star_val, current_fit$Param_a),
+                            "PowerLaw_2p" = H_L_2p(validation_data$k_hours, current_fit$H0, k_star, q_k_star_val, current_fit$Param_b),
+                            "Weibull_1p"  = H_W_1p_pdry(validation_data$k_hours, k_star, q_k_star_val, current_fit$Param_a),
+                            "PowerLaw_1p" = H_L_1p_pdry(validation_data$k_hours, k_star, q_k_star_val, current_fit$Param_b),
+                            rep(NA, length(validation_data$k_hours))
+   )
+   current_fit$smape_validation <- calculate_smape(actual_vals, predicted_vals)
+   return(current_fit)
+  })
+  
+  final_evaluated_models <- bind_rows(validation_results_list)
+  
+  # Best model selected by lowest Validation SMAPE
+  best_models <- final_evaluated_models %>% group_by(Statistic) %>% slice_min(order_by = smape_validation, n = 1) %>% ungroup()
+  
+  # --- 2.7 Generate All Predictions & Derived L-Moments ---
+  k_predict <- c(0.25, sort(unique(final_summary_df$k_hours))) 
+  
+  predicted_list <- lapply(unique(optimized_parameters_df$Statistic), function(stat) {
+   q_k_star_val <- final_summary_df[[stat]][final_summary_df$k_hours == k_star]
+   actual_vals <- final_summary_df[[stat]][match(k_predict, final_summary_df$k_hours)]
+   params <- optimized_parameters_df %>% filter(Statistic == stat)
+   df_stat <- data.frame(Scale_k = k_predict, Statistic = stat, Actual = actual_vals)
+   
+   for (i in seq_len(nrow(params))) {
+    m_name <- params$Model[i]
+    predicted_vals <- switch(m_name,
+                             "Weibull_2p"  = H_W_2p(k_predict, params$H0[i], k_star, q_k_star_val, params$Param_a[i]),
+                             "PowerLaw_2p" = H_L_2p(k_predict, params$H0[i], k_star, q_k_star_val, params$Param_b[i]),
+                             "Weibull_1p"  = H_W_1p_pdry(k_predict, k_star, q_k_star_val, params$Param_a[i]),
+                             "PowerLaw_1p" = H_L_1p_pdry(k_predict, k_star, q_k_star_val, params$Param_b[i]),
+                             rep(NA, length(k_predict)))
+    df_stat[[m_name]] <- predicted_vals
+   }
+   return(df_stat)
+  })
+  
+  all_predictions_df <- bind_rows(predicted_list)
+  
+  derived_l_moments_df <- all_predictions_df %>%
+   inner_join(best_models %>% select(Statistic, Best_Model = Model), by = "Statistic") %>%
+   mutate(Pred = case_when(
+    Best_Model == "Weibull_2p"  ~ Weibull_2p,
+    Best_Model == "PowerLaw_2p" ~ PowerLaw_2p,
+    Best_Model == "Weibull_1p"  ~ Weibull_1p,
+    Best_Model == "PowerLaw_1p" ~ PowerLaw_1p,
+    TRUE ~ NA_real_
+   )) %>%
+   select(Scale_k, Statistic, Pred, Actual) %>%
+   pivot_wider(names_from = Statistic, values_from = c(Pred, Actual)) %>%
+   mutate(
+    derived_Pred_t2_all = if (all(c("Pred_p_zero", "Pred_t2_pos") %in% names(.))) calc_t2_all(Pred_p_zero, Pred_t2_pos) else NA,
+    derived_Pred_t3_all = if (all(c("Pred_p_zero", "Pred_t2_pos", "Pred_t3_pos") %in% names(.))) calc_t3_all(Pred_p_zero, Pred_t2_pos, Pred_t3_pos) else NA,
+    derived_Pred_t4_all = if (all(c("Pred_p_zero", "Pred_t2_pos", "Pred_t3_pos", "Pred_t4_pos") %in% names(.))) calc_t4_all(Pred_p_zero, Pred_t2_pos, Pred_t3_pos, Pred_t4_pos) else NA,
+    
+    derived_Pred_t2_pos = if (all(c("Pred_p_zero", "Pred_t2_all") %in% names(.))) calc_t2_pos(Pred_p_zero, Pred_t2_all) else NA,
+    derived_Pred_t3_pos = if (all(c("Pred_p_zero", "Pred_t2_all", "Pred_t3_all") %in% names(.))) calc_t3_pos(Pred_p_zero, Pred_t2_all, Pred_t3_all) else NA,
+    derived_Pred_t4_pos = if (all(c("Pred_p_zero", "Pred_t2_all", "Pred_t3_all", "Pred_t4_all") %in% names(.))) calc_t4_pos(Pred_p_zero, Pred_t2_all, Pred_t3_all, Pred_t4_all) else NA,
+    
+    derived_Actual_t2_all = if (all(c("Actual_p_zero", "Actual_t2_pos") %in% names(.))) calc_t2_all(Actual_p_zero, Actual_t2_pos) else NA,
+    derived_Actual_t3_all = if (all(c("Actual_p_zero", "Actual_t2_pos", "Actual_t3_pos") %in% names(.))) calc_t3_all(Actual_p_zero, Actual_t2_pos, Actual_t3_pos) else NA,
+    derived_Actual_t4_all = if (all(c("Actual_p_zero", "Actual_t2_pos", "Actual_t3_pos", "Actual_t4_pos") %in% names(.))) calc_t4_all(Actual_p_zero, Actual_t2_pos, Actual_t3_pos, Actual_t4_pos) else NA,
+    
+    derived_Actual_t2_pos = if (all(c("Actual_p_zero", "Actual_t2_all") %in% names(.))) calc_t2_pos(Actual_p_zero, Actual_t2_all) else NA,
+    derived_Actual_t3_pos = if (all(c("Actual_p_zero", "Actual_t2_all", "Actual_t3_all") %in% names(.))) calc_t3_pos(Actual_p_zero, Actual_t2_all, Actual_t3_all) else NA,
+    derived_Actual_t4_pos = if (all(c("Actual_p_zero", "Actual_t2_all", "Actual_t3_all", "Actual_t4_all") %in% names(.))) calc_t4_pos(Actual_p_zero, Actual_t2_all, Actual_t3_all, Actual_t4_all) else NA
+   )
+  
+  # --- 2.8 Export Results ---
+  station_folder <- file.path(individual_dir, station_name)
+  dir.create(station_folder, recursive = TRUE, showWarnings = FALSE)
+  
+  saveRDS(final_summary_df, file.path(station_folder, "final_summary.rds"))
+  saveRDS(optimized_parameters_df, file.path(station_folder, "optimized_parameters.rds"))
+  saveRDS(final_evaluated_models, file.path(station_folder, "final_evaluated_models.rds"))
+  saveRDS(best_models, file.path(station_folder, "best_models.rds"))
+  saveRDS(all_predictions_df, file.path(station_folder, "all_predictions.rds"))
+  saveRDS(derived_l_moments_df, file.path(station_folder, "derived_l_moments.rds")) 
+  saveRDS(station_metadata_obj, file.path(station_folder, "extra_metadata.rds"))
+  
+  return(paste("Success:", station_name))
+  
+ }, error = function(e) {
+  return(paste("FAILED:", station_name, "-", conditionMessage(e)))
+ }) 
+}
+
+
+
+
+
+
+
+```
+
+
+
+```{r}
+
+# =====================================================================
+# 3. DIRECTORY SETUP & SEQUENTIAL EXECUTION
+# =====================================================================
+
+gdrive_path <- paste(LETTERS[file.exists(paste0(LETTERS, ":/My Drive"))], ":/My Drive", sep = "")
+project_path <- file.path(gdrive_path, "Academic_git/DownScaling")
+
+data_dir_name <- "QC_d data - Germany" 
+data_dir <- file.path(gdrive_path, "General_Data/GSDR", data_dir_name)
+individual_dir <- file.path(project_path, "Marginals", data_dir_name, "Testing") 
+
+station_files <- list.files(path = data_dir, pattern = "\\.txt$", full.names = TRUE)
+
+cat("Starting sequential processing of", length(station_files), "files...\n\n")
+station_files<-station_files[1:3]
+results <- list()
+for (file in station_files) {
+ cat("Processing file:", basename(file), "...")
+ res <- process_station(file, individual_dir)
+ results[[basename(file)]] <- res
+ cat(ifelse(grepl("^Success", res), " Done\n", paste("\n -> Error:", res, "\n")))
+}
+
+cat("\nProcessing Complete! Summary:\n")
+print(table(grepl("^Success", unlist(results))))
+
+```
+
+
+
+
+
+
+```{r}
+library(ggplot2)
+
+plot_moments <- function(data, metric, x_var = "Scale_k") {
+  
+  # 1. Dynamically construct the column names based on the metric you choose
+  col_pred           <- paste0("Pred_", metric)
+  col_actual         <- paste0("Actual_", metric)
+  col_derived_pred   <- paste0("derived_Pred_", metric)
+  col_derived_actual <- paste0("derived_Actual_", metric)
+  
+  # 2. Check if the columns actually exist in the data to prevent confusing errors
+  req_cols <- c(x_var, col_pred, col_actual, col_derived_pred, col_derived_actual)
+  missing_cols <- setdiff(req_cols, names(data))
+  if (length(missing_cols) > 0) {
+    stop("Missing columns in your dataset: ", paste(missing_cols, collapse = ", "))
+  }
+  
+  # 3. Create dynamic legend labels so they update based on the metric
+  lbl_pred           <- paste("Predicted", metric)
+  lbl_actual         <- paste("Actual", metric)
+  lbl_derived_pred   <- paste("Derived Pred", metric)
+  lbl_derived_actual <- paste("Derived Actual", metric)
+  
+  # Map the exact dynamic labels to your chosen colors
+  legend_colors <- setNames(
+    c("blue", "black", "red", "orange"),
+    c(lbl_pred, lbl_actual, lbl_derived_pred, lbl_derived_actual)
+  )
+  
+  # 4. Generate the plot using .data[[ ]] to evaluate the string variable names
+  p <- ggplot(data = data) +
+    
+    geom_line(aes(x = .data[[x_var]], y = .data[[col_pred]], color = lbl_pred),
+              linewidth = 1, alpha = 0.5, na.rm = TRUE) +
+    
+    geom_point(aes(x = .data[[x_var]], y = .data[[col_derived_pred]], color = lbl_derived_pred),
+               shape = 16, size = 3, alpha = 0.5, na.rm = TRUE) +
+    
+    geom_point(aes(x = .data[[x_var]], y = .data[[col_actual]], color = lbl_actual),
+               shape = 3, size = 3, stroke = 1, alpha = 0.8, na.rm = TRUE) +
+    
+    geom_point(aes(x = .data[[x_var]], y = .data[[col_derived_actual]], color = lbl_derived_actual),
+               shape = 4, size = 3, stroke = 1, alpha = 0.8, na.rm = TRUE) +
+    
+    scale_color_manual(
+      name = "Legend",
+      values = legend_colors
+    ) +
+    
+    labs(
+      x = paste(x_var, "(hours)"),
+      y = paste(metric, "values"),
+      title = paste("Comparison of Actual vs Predicted and Derived:", metric)
+    ) +
+    
+    theme_bw() +
+    scale_x_log10()
+  
+  return(p)
+}
+plot_moments(data = derived_l_moments[2:20,], metric = "t2_pos")
+plot_moments(data = derived_l_moments[2:20,], metric = "t2_all")
+
+
+
+```
+
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(lmomco)
+
+# Define the path to a specific station's output folder
+station_folder <- "G:/My Drive/Academic_git/DownScaling/Marginals/QC_d data - Germany/Testing/DE_00044"
+
+# Load the required RDS files
+preds_df <- readRDS(file.path(station_folder, "all_predictions.rds"))
+models_df <- readRDS(file.path(station_folder, "final_evaluated_models.rds"))
+derived_df <- readRDS(file.path(station_folder, "derived_l_moments.rds"))
+meta_obj <- readRDS(file.path(station_folder, "extra_metadata.rds"))
+best_models <- readRDS(file.path(station_folder, "best_models.rds"))
+
+plot_scaling <- function(stat_name) {
+  # Filter data for the chosen statistic
+  df_stat <- preds_df %>% filter(Statistic == stat_name)
+  df_stat<-df_stat[-1,]
+  best_mod <- best_models %>% filter(Statistic == stat_name) %>% pull(Model)
+  
+  ggplot(df_stat, aes(x = Scale_k)) +
+    # Models
+    geom_line(aes(y = Weibull_2p, color = "Weibull 2P"), size = 1) +
+    geom_line(aes(y = PowerLaw_2p, color = "PowerLaw 2P"), size = 1) +
+    # Actual Empirical Data
+    geom_point(aes(y = Actual, shape = "Empirical Data"), size = 3, color = "black") +
+    # 24-hour Calibration Anchor
+    geom_vline(xintercept = 24, linetype = "dashed", color = "gray50") +
+    scale_x_log10(breaks = c(1, 6, 12, 24, 48, 120, 240)) +
+    scale_color_manual(values = c("Weibull 2P" = "#0072B2", "PowerLaw 2P" = "#D55E00")) +
+    labs(
+      title = paste("Scaling Behavior of", stat_name),
+      subtitle = paste("Best Validation Model:", best_mod),
+      x = "Aggregation Scale k (Hours) [Log10]",
+      y = paste(stat_name, "Value [Log10]"),
+      color = "Model Fit", shape = "Observation"
+    ) +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+}
+
+# Example usage:
+plot_scaling("t2_pos")
+
+
+plot_smape_duel <- function() {
+  # Prep data for dumbbell plot
+  duel_data <- models_df %>%
+    filter(!is.na(smape_validation), Model %in% c("Weibull_2p", "PowerLaw_2p")) %>%
+    select(Statistic, Model, smape_validation) %>%
+    pivot_wider(names_from = Model, values_from = smape_validation)
+  
+  ggplot(duel_data) +
+    geom_segment(aes(x = Weibull_2p, xend = PowerLaw_2p, y = Statistic, yend = Statistic), color = "gray70", size = 1) +
+    geom_point(aes(x = Weibull_2p, y = Statistic, color = "Weibull 2P"), size = 4) +
+    geom_point(aes(x = PowerLaw_2p, y = Statistic, color = "PowerLaw 2P"), size = 4) +
+    scale_color_manual(values = c("Weibull 2P" = "#0072B2", "PowerLaw 2P" = "#D55E00")) +
+    labs(
+      title = "Validation SMAPE Comparison by Statistic",
+      subtitle = "Lower is better",
+      x = "SMAPE Validation Error (%)",
+      y = "Statistic",
+      color = "Model"
+    ) +
+    theme_minimal() +
+    theme(legend.position = "top")
+}
+
+ plot_smape_duel()
+
+ 
+ plot_consistency <- function(stat_base) {
+  direct_col <- sym(paste0("Actual_", stat_base))
+  derived_col <- sym(paste0("derived_Actual_", stat_base))
+  
+  ggplot(derived_df, aes(x = !!direct_col, y = !!derived_col)) +
+    geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red") +
+    geom_point(size = 3, alpha = 0.7) +
+    labs(
+      title = paste("Consistency Check:", stat_base),
+      subtitle = "Red dashed line is 1:1 perfect match",
+      x = "Directly Calculated from Data",
+      y = "Derived Mathematically via p_zero"
+    ) +
+    theme_minimal()
+}
+
+# Example usage:
+ plot_consistency("t2_all")
+ 
+ 
+ 
+ 
+```
+
+
+
+
+
+
+
+
+```{r}
+
+# --- NEW: L-MOMENT CONVERSION FUNCTIONS ---
+calc_t2_all <- function(p0, t2_pos) {
+  p1 <- 1 - p0
+  return(p0 + p1 * t2_pos)
+}
+
+calc_t3_all <- function(p0, t2_pos, t3_pos) {
+  p1 <- 1 - p0
+  numerator <- t2_pos * (p1^2) * t3_pos + 3 * p0 * p1 * t2_pos + 2 * (p0^2) - p0
+  denominator <- p0 + p1 * t2_pos
+  return(numerator / denominator)
+}
+
+calc_t4_all <- function(p0, t2_pos, t3_pos, t4_pos) {
+  p1 <- 1 - p0
+  numerator <- p0 * (5 * p0^2 - 5 * p0 + 1) + 
+               3 * p0 * p1 * (3 * p0 - 1) * t2_pos + 
+               5 * p0 * (p1^2) * t2_pos * t3_pos + 
+               (p1^3) * t2_pos * t4_pos
+  denominator <- p0 + p1 * t2_pos
+  return(numerator / denominator)
+}
+
+calc_t2_pos <- function(p0, t2_all) {
+  p1 <- 1 - p0
+  return((t2_all - p0) / p1)
+}
+
+calc_t3_pos <- function(p0, t2_all, t3_all) {
+  p1 <- 1 - p0
+  numerator <- t3_all * t2_all - 3 * p0 * t2_all + (p0^2) + p0
+  denominator <- p1 * (t2_all - p0)
+  return(numerator / denominator)
+}
+
+calc_t4_pos <- function(p0, t2_all, t3_all, t4_all) {
+  p1 <- 1 - p0
+  numerator <- t4_all * t2_all - 
+               5 * p0 * t3_all * t2_all + 
+               3 * p0 * (2 * p0 + 1) * t2_all - 
+               p0 * (p0^2 + 3 * p0 + 1)
+  denominator <- (p1^2) * (t2_all - p0)
+  return(numerator / denominator)
+}
+
+
+
+
+
+actual <- derived_l_moments[2:20, c(1, 17:31)]
+
+# "all" metrics
+all.equal(actual$Actual_l2_all / actual$Actual_l1_all, actual$Actual_t2_all)
+all.equal(actual$Actual_l3_all / actual$Actual_l2_all, actual$Actual_t3_all)
+all.equal(actual$Actual_l4_all / actual$Actual_l2_all, actual$Actual_t4_all)
+
+# "pos" metrics
+all.equal(actual$Actual_l2_pos / actual$Actual_l1_pos, actual$Actual_t2_pos)
+all.equal(actual$Actual_l3_pos / actual$Actual_l2_pos, actual$Actual_t3_pos)
+all.equal(actual$Actual_l4_pos / actual$Actual_l2_pos, actual$Actual_t4_pos)
+
+
+# --- Validating "all" metrics (calculated from "pos" and p_zero) ---
+
+all.equal(
+  calc_t2_all(actual$Actual_p_zero, actual$Actual_t2_pos), 
+  actual$Actual_t2_all
+)
+
+all.equal(
+  calc_t3_all(actual$Actual_p_zero, actual$Actual_t2_pos, actual$Actual_t3_pos), 
+  actual$Actual_t3_all
+)
+
+all.equal(
+  calc_t4_all(actual$Actual_p_zero, actual$Actual_t2_pos, actual$Actual_t3_pos, actual$Actual_t4_pos), 
+  actual$Actual_t4_all
+)
+
+
+# --- Validating "pos" metrics (calculated from "all" and p_zero) ---
+
+all.equal(
+  calc_t2_pos(actual$Actual_p_zero, actual$Actual_t2_all), 
+  actual$Actual_t2_pos
+)
+
+all.equal(
+  calc_t3_pos(actual$Actual_p_zero, actual$Actual_t2_all, actual$Actual_t3_all), 
+  actual$Actual_t3_pos
+)
+
+all.equal(
+  calc_t4_pos(actual$Actual_p_zero, actual$Actual_t2_all, actual$Actual_t3_all, actual$Actual_t4_all), 
+  actual$Actual_t4_pos
+)
+
+
+
+
+
+
+
+
+```
+
