@@ -184,11 +184,11 @@ process_station <- function(current_station_file, individual_dir) {
         scale = scale_name, k_hours = agg_length,
         p_zero = if(length(x_all) > 0) sum(x_all == 0) / length(x_all) else NA,
         mean_all = mean(x_all, na.rm = TRUE), var_all = var(x_all, na.rm = TRUE),
-        l1_all = lm_all[1], l2_all = lm_all[2], l3_all = lm_all[3], 
+        l1_all = lm_all[1], l2_all = lm_all[2], l3_all = lm_all[3], l4_all = lm_all[4],
         t2_all = lm_all[5], t3_all = lm_all[6], t4_all = lm_all[7],
         mean_pos = if(length(x_pos) > 0) mean(x_pos, na.rm = TRUE) else NA,
         var_pos = if(length(x_pos) > 1) var(x_pos, na.rm = TRUE) else NA,
-        l1_pos = lm_pos[1], l2_pos = lm_pos[2], l3_pos = lm_pos[3], 
+        l1_pos = lm_pos[1], l2_pos = lm_pos[2], l3_pos = lm_pos[3], l4_pos = lm_pos[4],
         t2_pos = lm_pos[5], t3_pos = lm_pos[6], t4_pos = lm_pos[7]
       )
     }
@@ -207,7 +207,7 @@ process_station <- function(current_station_file, individual_dir) {
     k_obs <- fit_data$k_hours
     k_star <- 24
     
-    stats_to_fit <- setdiff(names(fit_data), c("scale", "k_hours", "mean_all", "var_all", "l1_all", "l2_all", "l3_all", "mean_pos", "var_pos", "l1_pos", "l2_pos", "l3_pos"))
+    stats_to_fit <- setdiff(names(fit_data), c("scale", "k_hours", "mean_all", "var_all", "mean_pos", "var_pos"))
     de_ctrl <- DEoptim.control(trace = FALSE, itermax = 1000, NP = 50, reltol = 1e-11, steptol = 500)
     all_fits_list <- list()
     
@@ -370,7 +370,7 @@ individual_dir <- file.path(project_path, "Marginals", data_dir_name, "Testing")
 station_files <- list.files(path = data_dir, pattern = "\\.txt$", full.names = TRUE)
 
 cat("Starting sequential processing of", length(station_files), "files...\n\n")
-station_files<-station_files[5]
+station_files<-station_files[7]
 results <- list()
 for (file in station_files) {
   cat("Processing file:", basename(file), "...")
@@ -387,39 +387,185 @@ print(table(grepl("^Success", unlist(results))))
 ```{r}
 library(ggplot2)
 
-ggplot(data = derived_l_moments_new) +
+plot_moments <- function(data, metric, x_var = "Scale_k") {
+  
+  # 1. Dynamically construct the column names based on the metric you choose
+  col_pred           <- paste0("Pred_", metric)
+  col_actual         <- paste0("Actual_", metric)
+  col_derived_pred   <- paste0("derived_Pred_", metric)
+  col_derived_actual <- paste0("derived_Actual_", metric)
+  
+  # 2. Check if the columns actually exist in the data to prevent confusing errors
+  req_cols <- c(x_var, col_pred, col_actual, col_derived_pred, col_derived_actual)
+  missing_cols <- setdiff(req_cols, names(data))
+  if (length(missing_cols) > 0) {
+    stop("Missing columns in your dataset: ", paste(missing_cols, collapse = ", "))
+  }
+  
+  # 3. Create dynamic legend labels so they update based on the metric
+  lbl_pred           <- paste("Predicted", metric)
+  lbl_actual         <- paste("Actual", metric)
+  lbl_derived_pred   <- paste("Derived Pred", metric)
+  lbl_derived_actual <- paste("Derived Actual", metric)
+  
+  # Map the exact dynamic labels to your chosen colors
+  legend_colors <- setNames(
+    c("blue", "black", "red", "orange"),
+    c(lbl_pred, lbl_actual, lbl_derived_pred, lbl_derived_actual)
+  )
+  
+  # 4. Generate the plot using .data[[ ]] to evaluate the string variable names
+  p <- ggplot(data = data) +
+    
+    geom_line(aes(x = .data[[x_var]], y = .data[[col_pred]], color = lbl_pred),
+              linewidth = 1, alpha = 0.5, na.rm = TRUE) +
+    
+    geom_point(aes(x = .data[[x_var]], y = .data[[col_derived_pred]], color = lbl_derived_pred),
+               shape = 16, size = 3, alpha = 0.5, na.rm = TRUE) +
+    
+    geom_point(aes(x = .data[[x_var]], y = .data[[col_actual]], color = lbl_actual),
+               shape = 3, size = 3, stroke = 1, alpha = 0.8, na.rm = TRUE) +
+    
+    geom_point(aes(x = .data[[x_var]], y = .data[[col_derived_actual]], color = lbl_derived_actual),
+               shape = 4, size = 3, stroke = 1, alpha = 0.8, na.rm = TRUE) +
+    
+    scale_color_manual(
+      name = "Legend",
+      values = legend_colors
+    ) +
+    
+    labs(
+      x = paste(x_var, "(hours)"),
+      y = paste(metric, "values"),
+      title = paste("Comparison of Actual vs Predicted and Derived:", metric)
+    ) +
+    
+    theme_bw() +
+    scale_x_log10()
+  
+  return(p)
+}
+plot_moments(data = derived_l_moments[2:20,], metric = "t2_pos")
+plot_moments(data = derived_l_moments[2:20,], metric = "t2_all")
 
-  geom_line(aes(x = Scale_k, y = Pred_t2_pos, color = "Predicted t2_pos"),
-            linewidth = 1, alpha = 0.5, na.rm = TRUE) +
 
-  geom_point(aes(x = Scale_k, y = derived_Pred_t2_pos, color = "Derived Pred t2_pos"),
-             shape = 16, size = 3, alpha = 0.5, na.rm = TRUE) +
 
-  geom_point(aes(x = Scale_k, y = Actual_t2_pos, color = "Actual t2_pos"),
-             shape = 3, size = 3, stroke = 1, alpha = 0.8, na.rm = TRUE) +
+```
 
-  geom_point(aes(x = Scale_k, y = derived_Actual_t2_pos, color = "Derived_Actual_t2_pos"),
-             shape = 4, size = 3, stroke = 1, alpha = 0.8, na.rm = TRUE) +
- 
-  scale_color_manual(
-    name = "Legend",
-    breaks = c("Predicted t2_pos", "Actual t2_pos", "Derived Pred t2_pos", "Derived_Actual_t2_pos"),
-    values = c(
-      "Predicted t2_pos" = "blue",
-      "Actual t2_pos" = "black",
-      "Derived Pred t2_pos" = "red",
-      "Derived_Actual_t2_pos" = "orange"
-    )
-  ) +
 
-  labs(
-    x = "Scale k (hours)",
-    y = "t2_pos values",
-    title = "Comparison of Actual vs Predicted and Derivedt2_pos"
-  ) +
 
-  theme_bw() +
-  scale_x_log10()
+
+
+
+
+
+
+
+```{r}
+
+# --- NEW: L-MOMENT CONVERSION FUNCTIONS ---
+calc_t2_all <- function(p0, t2_pos) {
+  p1 <- 1 - p0
+  return(p0 + p1 * t2_pos)
+}
+
+calc_t3_all <- function(p0, t2_pos, t3_pos) {
+  p1 <- 1 - p0
+  numerator <- t2_pos * (p1^2) * t3_pos + 3 * p0 * p1 * t2_pos + 2 * (p0^2) - p0
+  denominator <- p0 + p1 * t2_pos
+  return(numerator / denominator)
+}
+
+calc_t4_all <- function(p0, t2_pos, t3_pos, t4_pos) {
+  p1 <- 1 - p0
+  numerator <- p0 * (5 * p0^2 - 5 * p0 + 1) + 
+               3 * p0 * p1 * (3 * p0 - 1) * t2_pos + 
+               5 * p0 * (p1^2) * t2_pos * t3_pos + 
+               (p1^3) * t2_pos * t4_pos
+  denominator <- p0 + p1 * t2_pos
+  return(numerator / denominator)
+}
+
+calc_t2_pos <- function(p0, t2_all) {
+  p1 <- 1 - p0
+  return((t2_all - p0) / p1)
+}
+
+calc_t3_pos <- function(p0, t2_all, t3_all) {
+  p1 <- 1 - p0
+  numerator <- t3_all * t2_all - 3 * p0 * t2_all + (p0^2) + p0
+  denominator <- p1 * (t2_all - p0)
+  return(numerator / denominator)
+}
+
+calc_t4_pos <- function(p0, t2_all, t3_all, t4_all) {
+  p1 <- 1 - p0
+  numerator <- t4_all * t2_all - 
+               5 * p0 * t3_all * t2_all + 
+               3 * p0 * (2 * p0 + 1) * t2_all - 
+               p0 * (p0^2 + 3 * p0 + 1)
+  denominator <- (p1^2) * (t2_all - p0)
+  return(numerator / denominator)
+}
+
+
+
+
+
+actual <- derived_l_moments[2:20, c(1, 17:31)]
+
+# "all" metrics
+all.equal(actual$Actual_l2_all / actual$Actual_l1_all, actual$Actual_t2_all)
+all.equal(actual$Actual_l3_all / actual$Actual_l2_all, actual$Actual_t3_all)
+all.equal(actual$Actual_l4_all / actual$Actual_l2_all, actual$Actual_t4_all)
+
+# "pos" metrics
+all.equal(actual$Actual_l2_pos / actual$Actual_l1_pos, actual$Actual_t2_pos)
+all.equal(actual$Actual_l3_pos / actual$Actual_l2_pos, actual$Actual_t3_pos)
+all.equal(actual$Actual_l4_pos / actual$Actual_l2_pos, actual$Actual_t4_pos)
+
+
+# --- Validating "all" metrics (calculated from "pos" and p_zero) ---
+
+all.equal(
+  calc_t2_all(actual$Actual_p_zero, actual$Actual_t2_pos), 
+  actual$Actual_t2_all
+)
+
+all.equal(
+  calc_t3_all(actual$Actual_p_zero, actual$Actual_t2_pos, actual$Actual_t3_pos), 
+  actual$Actual_t3_all
+)
+
+all.equal(
+  calc_t4_all(actual$Actual_p_zero, actual$Actual_t2_pos, actual$Actual_t3_pos, actual$Actual_t4_pos), 
+  actual$Actual_t4_all
+)
+
+
+# --- Validating "pos" metrics (calculated from "all" and p_zero) ---
+
+all.equal(
+  calc_t2_pos(actual$Actual_p_zero, actual$Actual_t2_all), 
+  actual$Actual_t2_pos
+)
+
+all.equal(
+  calc_t3_pos(actual$Actual_p_zero, actual$Actual_t2_all, actual$Actual_t3_all), 
+  actual$Actual_t3_pos
+)
+
+all.equal(
+  calc_t4_pos(actual$Actual_p_zero, actual$Actual_t2_all, actual$Actual_t3_all, actual$Actual_t4_all), 
+  actual$Actual_t4_pos
+)
+
+
+
+
+
+
+
 
 ```
 
