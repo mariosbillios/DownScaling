@@ -673,11 +673,15 @@ all.equal(
 )
 
 
-
-
-
-
-
-
 ```
+
+
+```{r}
+all_predictions_new<-all_predictions_new[all_predictions[1:2,],]
+```
+
+
+
+
+
 
