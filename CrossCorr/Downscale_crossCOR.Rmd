@@ -1,70 +1,83 @@
 ```{r message=FALSE, warning=FALSE}
+library(data.table)
 library(dplyr)
-library(readxl)
-library(ggplot2)
+library(tidyr)
 library(lubridate)
 library(DEoptim)
-library(lmomco)
-library(DEoptim)
 ```
 
 
 ```{r}
-
 # =====================================================================
-# MAIN EXECUTION SCRIPT
+# 1. MATHEMATICAL & OBJECTIVE FUNCTIONS (Joint Statistics / Lag-0)
 # =====================================================================
 
-
-gdrive_path <- paste(LETTERS[file.exists(paste0(LETTERS, ":/My Drive"))], ":/My Drive", sep = "")
-project_path <- file.path(gdrive_path, "Academic_git/DownScaling")
-generalData_path <- file.path(gdrive_path, "General_Data")
-
-
-data_dir <- file.path(generalData_path, "GSDR/QC_d data - Germany")
-
-
-folder_name <- basename(data_dir)
-folder_name <- sub(".*- ", "", folder_name)
-
-export_folder_name <- paste("Cross_Corr_Downs", folder_name)
-
-
-individual_dir <- file.path(project_path, export_folder_name)
-
-
-if (!dir.exists(individual_dir)) {
-  dir.create(individual_dir, recursive = TRUE)
-  message("Created new directory: ", individual_dir)
+# --- 2-Parameter Models (H_inf and shape) ---
+# Based on Equation 10
+H_W_joint_2p <- function(k, H_inf, k_star, q_k_star, a) {
+  power_exponent <- (k / k_star)^a
+  base_fraction <- 1 - (q_k_star / H_inf)
+  base_fraction <- ifelse(base_fraction < 0, 1e-9, base_fraction) # Prevent NaN
+  H_inf * (1 - base_fraction ^ power_exponent)
 }
 
+# Based on Equation 11
+H_L_joint_2p <- function(k, H_inf, k_star, q_k_star, b) {
+  ln_numerator <- log(1 + b * k)
+  ln_denominator <- log(1 + b * k_star)
+  power_exponent <- ln_numerator / ln_denominator
+  base_fraction <- 1 - (q_k_star / H_inf)
+  base_fraction <- ifelse(base_fraction < 0, 1e-9, base_fraction)
+  H_inf * (1 - base_fraction ^ power_exponent)
+}
 
-station_files <- list.files(path = data_dir, pattern = "\\.txt$", full.names = TRUE)
+# --- 1-Parameter Models (Fixing H_inf = 1) ---
+H_W_joint_1p <- function(k, k_star, q_k_star, a) {
+  H_inf <- 0.99
+  power_exponent <- (k / k_star)^a
+  base_fraction <- 1 - (q_k_star / H_inf)
+  base_fraction <- ifelse(base_fraction < 0, 1e-9, base_fraction)
+  H_inf * (1 - base_fraction ^ power_exponent)
+}
+
+H_L_joint_1p <- function(k, k_star, q_k_star, b) {
+  H_inf <- 0.99
+  ln_numerator <- log(1 + b * k)
+  ln_denominator <- log(1 + b * k_star)
+  power_exponent <- ln_numerator / ln_denominator
+  base_fraction <- 1 - (q_k_star / H_inf)
+  base_fraction <- ifelse(base_fraction < 0, 1e-9, base_fraction)
+  H_inf * (1 - base_fraction ^ power_exponent)
+}
+
+# --- FITTING FUNCTIONS (MSE) ---
+mse_W_joint_2p <- function(par, k, y, k_star, q_k_star) mean((y - H_W_joint_2p(k, par[1], k_star, q_k_star, par[2]))^2, na.rm=TRUE)
+mse_L_joint_2p <- function(par, k, y, k_star, q_k_star) mean((y - H_L_joint_2p(k, par[1], k_star, q_k_star, par[2]))^2, na.rm=TRUE)
+mse_W_joint_1p <- function(par, k, y, k_star, q_k_star) mean((y - H_W_joint_1p(k, k_star, q_k_star, par[1]))^2, na.rm=TRUE)
+mse_L_joint_1p <- function(par, k, y, k_star, q_k_star) mean((y - H_L_joint_1p(k, k_star, q_k_star, par[1]))^2, na.rm=TRUE)
+
+# --- VALIDATION FUNCTION (SMAPE) ---
+calculate_smape <- function(actual, predicted) {
+  mask <- !is.na(actual) & !is.na(predicted)
+  if (sum(mask) == 0) return(NA)
+  a <- actual[mask]
+  p <- predicted[mask]
+  numerator <- abs(p - a)
+  denominator <- (abs(a) + abs(p)) / 2
+  return(mean(numerator / (denominator + 1e-9)) * 100)
+}
 ```
 
 
-
 ```{r}
-
-
-station_files <- station_files[1:2]
-
-# --- 1. SETUP STORAGE ---
-raw_data_list <- list()
-all_inspection_lists <- list()
-all_clean_bins_lists <- list()
-
-
-for (current_station_file in station_files) {
-  
-  station_name <- tools::file_path_sans_ext(basename(current_station_file))
-  cat("Reading station:", station_name, "\n")
-  
-  
-  df <- read.table(current_station_file, skip = 21, col.names = "precip")
+# =====================================================================
+# 2. HELPER: READ AND FORMAT SINGLE STATION
+# =====================================================================
+read_station_data <- function(file_path) {
+  df <- data.table::fread(file_path, skip = 21, col.names = "precip", data.table = FALSE)
   df$precip[df$precip == -999] <- NA
-
-  header_lines <- readLines(current_station_file, n = 21)
+  
+  header_lines <- readLines(file_path, n = 21)
   start_date_str <- sub("Start datetime: ", "", grep("^Start datetime:", header_lines, value = TRUE))
   end_date_str <- sub("End datetime: ", "", grep("^End datetime:", header_lines, value = TRUE))
   
@@ -72,327 +85,283 @@ for (current_station_file in station_files) {
   end_ts <- ymd_h(end_date_str)
   df$date <- seq(start_ts, end_ts, by = "hour")
   
-
-  raw_data_list[[station_name]] <- df
+  return(as.data.table(df))
 }
 
 
-common_start <- max(do.call(c, lapply(raw_data_list, function(df) min(df$date))))
-common_end <- min(do.call(c, lapply(raw_data_list, function(df) max(df$date))))
+# =====================================================================
+# 3. CORE BIVARIATE PROCESSING FUNCTION
+# =====================================================================
 
-
-Base_time_chunks_per_hour <- 4
-empirical_k_training <- seq(1:10) * 24 * Base_time_chunks_per_hour
-empirical_k_validation <- c(1,2,4,6,8,10,12) * Base_time_chunks_per_hour
-all_k <- c(empirical_k_validation, empirical_k_training)
-
-for (station_name in names(raw_data_list)) {
+process_station_pair <- function(file1, file2, pair_dir) {
   
+  stat1_name <- tools::file_path_sans_ext(basename(file1))
+  stat2_name <- tools::file_path_sans_ext(basename(file2))
+  pair_name <- paste0(stat1_name, "_vs_", stat2_name)
   
-
-  df <- raw_data_list[[station_name]]
-  df <- df %>% filter(date >= common_start & date <= common_end)
-  
-
-  df$precip_rate <- df$precip / Base_time_chunks_per_hour
-  df$hour_index <- 0:(nrow(df) - 1)
-  
-
-  station_inspection_list <- list()
-  station_clean_bins_list <- list()
-  
-
-  for (i in seq_along(all_k)) {
-    agg_length <- all_k[i] / Base_time_chunks_per_hour
+  tryCatch({
+    # --- 3.1 Read Stations ---
+    dt1 <- read_station_data(file1)
+    dt2 <- read_station_data(file2)
     
-    df_detailed <- df %>%
-      mutate(bin_id = hour_index %/% agg_length) %>%
-      group_by(bin_id) %>%
-      mutate(
-        hours_in_bin = n(),
-        bin_mean_precip = mean(precip_rate, na.rm = FALSE),
-        is_valid_bin = (!is.na(bin_mean_precip) & hours_in_bin == agg_length)
-      ) %>%
-      ungroup()
+    st1_start <- min(dt1$date)
+    st1_end <- max(dt1$date)
+    st2_start <- min(dt2$date)
+    st2_end <- max(dt2$date)
     
-    list_name <- paste0("scale_", agg_length, "Hours")
-    station_inspection_list[[list_name]] <- df_detailed
-  }
-  
-
-  for (scale_name in names(station_inspection_list)) {
-    df_detailed <- station_inspection_list[[scale_name]]
-    valid_bins <- df_detailed %>%
-      filter(is_valid_bin) %>%
-      group_by(bin_id) %>%
-      summarise(
-        agg_date = min(date),
-        bin_mean_precip = first(bin_mean_precip),
-        .groups = "drop"
+    setnames(dt1, "precip", "p1")
+    setnames(dt2, "precip", "p2")
+    
+    # --- 3.2 Overlap Timeline & Data Loss Calculation ---
+    overlap_start <- max(st1_start, st2_start)
+    overlap_end <- min(st1_end, st2_end)
+    
+    if (overlap_start > overlap_end) {
+      stop("No overlapping time period between these two stations.")
+    }
+    
+    # Calculate exactly how many hours are "deleted" due to the merge
+    st1_deleted_start_hrs <- as.numeric(difftime(overlap_start, st1_start, units = "hours"))
+    st1_deleted_end_hrs <- as.numeric(difftime(st1_end, overlap_end, units = "hours"))
+    
+    st2_deleted_start_hrs <- as.numeric(difftime(overlap_start, st2_start, units = "hours"))
+    st2_deleted_end_hrs <- as.numeric(difftime(st2_end, overlap_end, units = "hours"))
+    
+    # Create the strict, continuous hourly backbone for the overlapping period
+    master_timeline <- data.table(date = seq(overlap_start, overlap_end, by = "hour"))
+    
+    # Left join both stations onto the master timeline
+    merged_df <- merge(master_timeline, dt1, by = "date", all.x = TRUE)
+    merged_df <- merge(merged_df, dt2, by = "date", all.x = TRUE)
+    
+    # Ensure ordering and assign hour index
+    merged_df <- merged_df[order(date)]
+    merged_df[, hour_index := 0:(.N - 1)]
+    
+    # --- 3.3 Compile Full Metadata Object ---
+    station_metadata_obj <- list(
+      Station_1_Info = list(
+        Station = stat1_name,
+        Original_Start = st1_start,
+        Original_End = st1_end,
+        Original_Theoretical_Hours = nrow(dt1),
+        Deleted_Hours_Before_Overlap = st1_deleted_start_hrs,
+        Deleted_Hours_After_Overlap = st1_deleted_end_hrs,
+        Total_Deleted_Hours = st1_deleted_start_hrs + st1_deleted_end_hrs
+      ),
+      Station_2_Info = list(
+        Station = stat2_name,
+        Original_Start = st2_start,
+        Original_End = st2_end,
+        Original_Theoretical_Hours = nrow(dt2),
+        Deleted_Hours_Before_Overlap = st2_deleted_start_hrs,
+        Deleted_Hours_After_Overlap = st2_deleted_end_hrs,
+        Total_Deleted_Hours = st2_deleted_start_hrs + st2_deleted_end_hrs
+      ),
+      Merged_Timeline_Info = list(
+        Overlap_Start = overlap_start,
+        Overlap_End = overlap_end,
+        Common_Timeline_Hours = nrow(master_timeline),
+        St1_NAs_in_Common_Timeline = sum(is.na(merged_df$p1)),
+        St2_NAs_in_Common_Timeline = sum(is.na(merged_df$p2)),
+        Both_NA_Simultaneously = sum(is.na(merged_df$p1) & is.na(merged_df$p2))
       )
-    station_clean_bins_list[[scale_name]] <- valid_bins
-  }
-  
-
-  all_inspection_lists[[station_name]] <- station_inspection_list
-  all_clean_bins_lists[[station_name]] <- station_clean_bins_list
+    )
+    
+    # --- 3.4 Aggregation & Cross-Correlation ---
+    all_k <- c(1:12, 24, 24*2, 24*3, 24*4, 24*5, 24*9, 24*10)
+    summary_stats_list <- vector("list", length(all_k))
+    
+    for (i in seq_along(all_k)) {
+      agg_length <- all_k[i]
+      
+      if (agg_length < 6) { max_na <- 0 }
+      else if (agg_length >= 6 & agg_length <= 12) { max_na <- 1 }
+      else { max_na <- min(ceiling(agg_length / 5), agg_length - 1) }
+      
+      agg_dt <- merged_df[, .(
+        n_total = .N,
+        n_na_1 = sum(is.na(p1)),
+        n_na_2 = sum(is.na(p2)),
+        sum_p1 = sum(p1, na.rm = TRUE),
+        sum_p2 = sum(p2, na.rm = TRUE)
+      ), by = .(bin_id = hour_index %/% agg_length)]
+      
+      valid_bins <- agg_dt[n_total == agg_length & n_na_1 <= max_na & n_na_2 <= max_na]
+      
+      valid_bins[, mean_p1 := sum_p1 / (n_total - n_na_1)]
+      valid_bins[, mean_p2 := sum_p2 / (n_total - n_na_2)]
+      
+      if(nrow(valid_bins) > 5) { 
+        rho_all <- cor(valid_bins$mean_p1, valid_bins$mean_p2, method = "pearson")
+        wet_bins <- valid_bins[mean_p1 > 0 & mean_p2 > 0]
+        rho_wet <- if(nrow(wet_bins) > 5) cor(wet_bins$mean_p1, wet_bins$mean_p2, method = "pearson") else NA
+      } else {
+        rho_all <- NA
+        rho_wet <- NA
+      }
+      
+      summary_stats_list[[i]] <- data.frame(k_hours = agg_length, n_valid_pairs = nrow(valid_bins), rho_all = rho_all, rho_wet = rho_wet)
+    }
+    
+    final_summary_df <- data.table::rbindlist(summary_stats_list)
+    
+    # --- 3.5 DEoptim Model Fitting (Correlation Scaling) ---
+    fit_data <- final_summary_df %>% filter(k_hours >= 24) %>% arrange(k_hours)
+    k_obs <- fit_data$k_hours
+    k_star <- 24
+    
+    stats_to_fit <- c("rho_all", "rho_wet")
+    de_ctrl <- DEoptim.control(trace = FALSE, itermax = 1000, NP = 50, reltol = 1e-11, steptol = 500)
+    all_fits_list <- list()
+    
+    for (stat in stats_to_fit) {
+      y_obs <- fit_data[[stat]]
+      if (all(is.na(y_obs))) next
+      
+      q_k_star <- fit_data[[stat]][fit_data$k_hours == k_star][1]
+      if (is.na(q_k_star) || q_k_star <= 0) next
+      
+      lower_H_inf <- min(q_k_star + 1e-6, 0.9999)
+      max_H_inf <- 1.0
+      
+      fit_W_2p <- DEoptim(mse_W_joint_2p, lower = c(lower_H_inf, 1e-6), upper = c(max_H_inf, 10), k = k_obs, y = y_obs, k_star = k_star, q_k_star = q_k_star, control = de_ctrl)
+      fit_L_2p <- DEoptim(mse_L_joint_2p, lower = c(lower_H_inf, 1e-6), upper = c(max_H_inf, 10), k = k_obs, y = y_obs, k_star = k_star, q_k_star = q_k_star, control = de_ctrl)
+      
+      fit_W_1p <- DEoptim(mse_W_joint_1p, lower = 1e-6, upper = 10, k = k_obs, y = y_obs, k_star = k_star, q_k_star = q_k_star, control = de_ctrl)
+      fit_L_1p <- DEoptim(mse_L_joint_1p, lower = 1e-6, upper = 10, k = k_obs, y = y_obs, k_star = k_star, q_k_star = q_k_star, control = de_ctrl)
+      
+      res_row <- data.frame(
+        Statistic = stat, 
+        Model = c("Weibull_2p", "PowerLaw_2p", "Weibull_1p", "PowerLaw_1p"), 
+        H_inf = c(fit_W_2p$optim$bestmem[1], fit_L_2p$optim$bestmem[1], 1, 1), 
+        Param_a = c(fit_W_2p$optim$bestmem[2], NA, fit_W_1p$optim$bestmem[1], NA), 
+        Param_b = c(NA, fit_L_2p$optim$bestmem[2], NA, fit_L_1p$optim$bestmem[1]), 
+        MSE_Fitting = c(fit_W_2p$optim$bestval, fit_L_2p$optim$bestval, fit_W_1p$optim$bestval, fit_L_1p$optim$bestval)
+      )
+      all_fits_list[[stat]] <- res_row
+    }
+    
+    optimized_parameters_df <- bind_rows(all_fits_list)
+    
+    # --- 3.6 Evaluate Validation Data (USING SMAPE) ---
+    validation_data <- final_summary_df %>% filter(k_hours < 24) %>% arrange(k_hours)
+    empirical_24h <- final_summary_df %>% filter(k_hours == k_star)
+    
+    validation_results_list <- lapply(seq_len(nrow(optimized_parameters_df)), function(i) {
+      current_fit <- optimized_parameters_df[i, ]
+      actual_vals <- validation_data[[current_fit$Statistic]]
+      q_k_star_val <- empirical_24h[[current_fit$Statistic]]
+      
+      if (all(is.na(actual_vals))) { 
+          current_fit$smape_validation <- NA
+          return(current_fit)
+      }
+      
+      predicted_vals <- switch(current_fit$Model,
+                               "Weibull_2p"  = H_W_joint_2p(validation_data$k_hours, current_fit$H_inf, k_star, q_k_star_val, current_fit$Param_a),
+                               "PowerLaw_2p" = H_L_joint_2p(validation_data$k_hours, current_fit$H_inf, k_star, q_k_star_val, current_fit$Param_b),
+                               "Weibull_1p"  = H_W_joint_1p(validation_data$k_hours, k_star, q_k_star_val, current_fit$Param_a),
+                               "PowerLaw_1p" = H_L_joint_1p(validation_data$k_hours, k_star, q_k_star_val, current_fit$Param_b),
+                               rep(NA, length(validation_data$k_hours))
+      )
+      current_fit$smape_validation <- calculate_smape(actual_vals, predicted_vals)
+      return(current_fit)
+    })
+    
+    final_evaluated_models <- bind_rows(validation_results_list)
+    best_models <- final_evaluated_models %>% group_by(Statistic) %>% slice_min(order_by = smape_validation, n = 1) %>% ungroup()
+    
+    # --- 3.7 Generate All Predictions ---
+    k_predict <- c(0.25, sort(unique(final_summary_df$k_hours)))
+    
+    predicted_list <- lapply(unique(optimized_parameters_df$Statistic), function(stat) {
+      q_k_star_val <- final_summary_df[[stat]][final_summary_df$k_hours == k_star]
+      actual_vals <- final_summary_df[[stat]][match(k_predict, final_summary_df$k_hours)]
+      params <- optimized_parameters_df %>% filter(Statistic == stat)
+      df_stat <- data.frame(Scale_k = k_predict, Statistic = stat, Actual = actual_vals)
+      
+      for (i in seq_len(nrow(params))) {
+        m_name <- params$Model[i]
+        predicted_vals <- switch(m_name,
+                                 "Weibull_2p"  = H_W_joint_2p(k_predict, params$H_inf[i], k_star, q_k_star_val, params$Param_a[i]),
+                                 "PowerLaw_2p" = H_L_joint_2p(k_predict, params$H_inf[i], k_star, q_k_star_val, params$Param_b[i]),
+                                 "Weibull_1p"  = H_W_joint_1p(k_predict, k_star, q_k_star_val, params$Param_a[i]),
+                                 "PowerLaw_1p" = H_L_joint_1p(k_predict, k_star, q_k_star_val, params$Param_b[i]),
+                                 rep(NA, length(k_predict)))
+        df_stat[[m_name]] <- predicted_vals
+      }
+      return(df_stat)
+    })
+    
+    all_predictions_df <- bind_rows(predicted_list)
+    
+    # --- 3.8 Export Results ---
+    folder_path <- file.path(pair_dir, pair_name)
+    dir.create(folder_path, recursive = TRUE, showWarnings = FALSE)
+    
+    saveRDS(final_summary_df, file.path(folder_path, "cross_corr_summary.rds"))
+    saveRDS(optimized_parameters_df, file.path(folder_path, "optimized_parameters.rds"))
+    saveRDS(final_evaluated_models, file.path(folder_path, "final_evaluated_models.rds"))
+    saveRDS(best_models, file.path(folder_path, "best_models.rds"))
+    saveRDS(all_predictions_df, file.path(folder_path, "all_predictions.rds"))
+    
+    # Save the requested detailed metadata
+    saveRDS(station_metadata_obj, file.path(folder_path, "extra_metadata.rds"))
+    
+    return(paste("Success:", pair_name))
+    
+  }, error = function(e) {
+    return(paste("FAILED:", pair_name, "-", conditionMessage(e)))
+  }) 
 }
-
-
 ```
+
+
 
 
 
 
 ```{r}
-# Extract the names of your two stations
-station_names <- names(all_clean_bins_lists)
-stat1 <- station_names[1]
-stat2 <- station_names[2]
+# =====================================================================
+# 4. DIRECTORY SETUP & PAIRWISE EXECUTION
+# =====================================================================
+gdrive_path <- paste(LETTERS[file.exists(paste0(LETTERS, ":/My Drive"))], ":/My Drive", sep = "")
+project_path <- file.path(gdrive_path, "Academic_git/DownScaling")
 
+data_dir_name <- "QC_d data - Germany" 
+data_dir <- file.path(gdrive_path, "General_Data/GSDR", data_dir_name)
+pair_dir <- file.path(project_path, "CrossCorrelation", data_dir_name, "Testing") 
 
+station_files <- list.files(path = data_dir, pattern = "\\.txt$", full.names = TRUE)
 
-scale_names <- names(all_clean_bins_lists[[stat1]])
+# Creating pairs (for demonstration, pairing the 1st station with the 2nd and 3rd)
+target_station <- station_files[1]
+compare_stations <- station_files[2:3]
 
+cat("Starting pairwise processing...\n\n")
+results <- list()
 
-correlation_results <- data.frame(
-  Scale = character(),
-  Numeric_Hours = numeric(),
-  Valid_Bin_Pairs = integer(),
-  Correlation_Lag_0 = numeric(),
-  stringsAsFactors = FALSE
-)
-
-for (scale_name in scale_names) {
-  
-
-  df1 <- all_clean_bins_lists[[stat1]][[scale_name]]
-  df2 <- all_clean_bins_lists[[stat2]][[scale_name]]
-  
-
-  joined_df <- inner_join(df1, df2, by = "bin_id", suffix = c("_1", "_2"))
-  
-  n_pairs <- nrow(joined_df)
-  
-
-  if (n_pairs > 1) {
-    corr_val <- cor(joined_df$bin_mean_precip_1, joined_df$bin_mean_precip_2, method = "pearson")
-  } else {
-    corr_val <- NA 
-  }
-  
-
-  num_hours <- as.numeric(gsub("[^0-9]", "", scale_name))
-  
-
-  correlation_results <- rbind(correlation_results, data.frame(
-    Scale = scale_name,
-    Numeric_Hours = num_hours,
-    Valid_Bin_Pairs = n_pairs,
-    Correlation_Lag_0 = corr_val
-  ))
+for (file2 in compare_stations) {
+  cat("Processing pair:", basename(target_station), "vs", basename(file2), "...")
+  res <- process_station_pair(target_station, file2, pair_dir)
+  results[[basename(file2)]] <- res
+  cat(ifelse(grepl("^Success", res), " Done\n", paste("\n -> Error:", res, "\n")))
 }
 
-
-correlation_results <- correlation_results %>% 
-  arrange(Numeric_Hours) %>%
-  select(-Numeric_Hours) 
-
-# View the final table
-print(correlation_results)
-
-correlation_results$Scale_num <- as.numeric(
-  gsub("scale_|Hours", "", correlation_results$Scale)
-)
-
-
+cat("\nProcessing Complete! Summary:\n")
+print(table(grepl("^Success", unlist(results))))
 ```
 
 
 
-```{r}
-# =====================================================================
-# =====================================================================
-
-H_W_2p_cross <- function(k, H_inf, k_star, q_k_star, a) {
-  exponent <- (k / k_star)^a
-  base_fraction <- 1 - (q_k_star / H_inf)
-  
-
-  base_fraction <- ifelse(base_fraction <= 0, 1e-6, base_fraction) 
-  
-  H_inf * (1 - (base_fraction ^ exponent))
-}
-
-
-H_L_2p_cross <- function(k, H_inf, k_star, q_k_star, b) {
-  ln_numerator <- log(1 + b * k)
-  ln_denominator <- log(1 + b * k_star)
-  exponent <- ln_numerator / ln_denominator
-  base_fraction <- 1 - (q_k_star / H_inf)
-  
-  base_fraction <- ifelse(base_fraction <= 0, 1e-6, base_fraction)
-  
-  H_inf * (1 - (base_fraction ^ exponent))
-}
-
-
-H_W_1p_cross <- function(k, k_star, q_k_star, a) {
-  H_inf <- 1 
-  exponent <- (k / k_star)^a
-  base_fraction <- 1 - (q_k_star / H_inf)
-  
-  base_fraction <- ifelse(base_fraction <= 0, 1e-6, base_fraction)
-  
-  H_inf * (1 - (base_fraction ^ exponent))
-}
-
-H_L_1p_cross <- function(k, k_star, q_k_star, b) {
-  H_inf <- 1 
-  ln_numerator <- log(1 + b * k)
-  ln_denominator <- log(1 + b * k_star)
-  exponent <- ln_numerator / ln_denominator
-  base_fraction <- 1 - (q_k_star / H_inf)
-  
-  base_fraction <- ifelse(base_fraction <= 0, 1e-6, base_fraction)
-  
-  H_inf * (1 - (base_fraction ^ exponent))
-}
-
-mse_W_2p_cross <- function(par, k, y, k_star, q_k_star) mean((y - H_W_2p_cross(k, par[1], k_star, q_k_star, par[2]))^2, na.rm=TRUE)
-mse_L_2p_cross <- function(par, k, y, k_star, q_k_star) mean((y - H_L_2p_cross(k, par[1], k_star, q_k_star, par[2]))^2, na.rm=TRUE)
-
-mse_W_1p_cross <- function(par, k, y, k_star, q_k_star) mean((y - H_W_1p_cross(k, k_star, q_k_star, par[1]))^2, na.rm=TRUE)
-mse_L_1p_cross <- function(par, k, y, k_star, q_k_star) mean((y - H_L_1p_cross(k, k_star, q_k_star, par[1]))^2, na.rm=TRUE)
-```
 
 
 
-```{r}
-
-
-fit_data <- correlation_results %>%
-
-  rename(
-    k_hours = Scale_num, 
-    cross_corr = Correlation_Lag_0
-  ) %>%
-
-  select(k_hours, cross_corr) %>%
-
-  arrange(k_hours)
-
-head(fit_data)
 
 
 
-# =====================================================================
-# =====================================================================
-k_star <- 24
 
-
-training_data <- fit_data %>% filter(k_hours >= k_star) %>% arrange(k_hours)
-validation_data <- fit_data %>% filter(k_hours < k_star & k_hours >= 1) %>% arrange(k_hours)
-
-
-k_obs <- training_data$k_hours
-y_obs <- training_data$cross_corr
-q_k_star <- training_data$cross_corr[training_data$k_hours == k_star][1]
-
-# =====================================================================
-# =====================================================================
-de_ctrl <- DEoptim.control(
-  trace = FALSE, 
-  itermax = 5000,   
-  NP = 500,         
-  reltol = 1e-11,    
-  steptol = 500     
- )
-
-
-lower_bounds_2p <- c( 1e-5, 1e-6)
-upper_bounds_2p <- c(1.0, 1000)
-
-# 2-Parameter Fits
-fit_W_2p <- DEoptim(mse_W_2p_cross, lower = lower_bounds_2p, upper = upper_bounds_2p, 
-                    k = k_obs, y = y_obs, k_star = k_star, q_k_star = q_k_star, control = de_ctrl)
-
-fit_L_2p <- DEoptim(mse_L_2p_cross, lower = lower_bounds_2p, upper = upper_bounds_2p, 
-                    k = k_obs, y = y_obs, k_star = k_star, q_k_star = q_k_star, control = de_ctrl)
-
-
-fit_W_1p <- DEoptim(mse_W_1p_cross, lower = 1e-6, upper = 1000, 
-                    k = k_obs, y = y_obs, k_star = k_star, q_k_star = q_k_star, control = de_ctrl)
-
-fit_L_1p <- DEoptim(mse_L_1p_cross, lower = 1e-6, upper = 1000, 
-                    k = k_obs, y = y_obs, k_star = k_star, q_k_star = q_k_star, control = de_ctrl)
-
-
-optimized_params <- data.frame(
-  Model = c("Weibull_2p", "PowerLaw_2p", "Weibull_1p", "PowerLaw_1p"),
-  H_inf = c(fit_W_2p$optim$bestmem[1], fit_L_2p$optim$bestmem[1], 1, 1),
-  Param_shape = c(fit_W_2p$optim$bestmem[2], fit_L_2p$optim$bestmem[2], 
-                  fit_W_1p$optim$bestmem[1], fit_L_1p$optim$bestmem[1]),
-  Training_MSE = c(fit_W_2p$optim$bestval, fit_L_2p$optim$bestval, 
-                   fit_W_1p$optim$bestval, fit_L_1p$optim$bestval)
-)
-
-# =====================================================================
-# =====================================================================
-k_val <- validation_data$k_hours
-y_val_actual <- validation_data$cross_corr
-
-
-pred_W_2p_val <- H_W_2p_cross(k_val, optimized_params$H_inf[1], k_star, q_k_star, optimized_params$Param_shape[1])
-pred_L_2p_val <- H_L_2p_cross(k_val, optimized_params$H_inf[2], k_star, q_k_star, optimized_params$Param_shape[2])
-pred_W_1p_val <- H_W_1p_cross(k_val, k_star, q_k_star, optimized_params$Param_shape[3])
-pred_L_1p_val <- H_L_1p_cross(k_val, k_star, q_k_star, optimized_params$Param_shape[4])
-
-
-optimized_params$Validation_MSE <- c(
-  mean((y_val_actual - pred_W_2p_val)^2, na.rm = TRUE),
-  mean((y_val_actual - pred_L_2p_val)^2, na.rm = TRUE),
-  mean((y_val_actual - pred_W_1p_val)^2, na.rm = TRUE),
-  mean((y_val_actual - pred_L_1p_val)^2, na.rm = TRUE)
-)
-
-print(optimized_params)
-
-# =====================================================================
-
-# =====================================================================
-
-k_all <- c(0.25, validation_data$k_hours, training_data$k_hours)
-
-all_predictions <- data.frame(
-  k_hours = k_all,
-  Actual_Corr = c(NA, validation_data$cross_corr, training_data$cross_corr) 
-)
-
-
-all_predictions$Weibull_2p <- H_W_2p_cross(k_all, optimized_params$H_inf[1], k_star, q_k_star, optimized_params$Param_shape[1])
-all_predictions$PowerLaw_2p <- H_L_2p_cross(k_all, optimized_params$H_inf[2], k_star, q_k_star, optimized_params$Param_shape[2])
-all_predictions$Weibull_1p <- H_W_1p_cross(k_all, k_star, q_k_star, optimized_params$Param_shape[3])
-all_predictions$PowerLaw_1p <- H_L_1p_cross(k_all, k_star, q_k_star, optimized_params$Param_shape[4])
-
-
-```
-
-
-```{r}
-
-
-
-best_model_info <- optimized_parameters %>%
-  slice_min(order_by = Validation_MSE, n = 1)
-
-best_model_name <- best_model_info$Model
-best_model_mse <- best_model_info$Validation_MSE
-
-best_15min_prediction <- all_predictions[[best_model_name]][all_predictions$k_hours == 0.25]
-
-
-```
 
 
 
@@ -401,109 +370,108 @@ library(ggplot2)
 library(dplyr)
 library(tidyr)
 
-# =====================================================================
-# ====================================================================
-
-df_points <- fit_data %>%
-  filter(k_hours >= 1) %>%
-  rename(k = k_hours, rho = cross_corr) %>%
-  mutate(Data_Type = ifelse(k >= 24, "Calib. data", "Valid. data")) %>%
-  mutate(Data_Type = factor(Data_Type, levels = c("Calib. data", "Valid. data")))
-
-# =====================================================================
-# =====================================================================
-k_star <- 24
-q_k_star <- df_points$rho[df_points$k == k_star][1]
-
-
-k_smooth <- exp(seq(log(1), log(250), length.out = 300))
-
-
-get_param <- function(mod_name, param_col) {
-  val <- optimized_params[[param_col]][optimized_params$Model == mod_name]
-  return(val[1])
+plot_cross_correlation_ggplot <- function(pair_folder_path, stat = "rho_all") {
+  
+  # 1. Load data
+  preds_file <- file.path(pair_folder_path, "all_predictions.rds")
+  best_file <- file.path(pair_folder_path, "best_models.rds")
+  
+  if (!file.exists(preds_file) || !file.exists(best_file)) {
+    stop("Data files not found in the specified folder.")
+  }
+  
+  preds_df <- readRDS(preds_file)
+  best_models <- readRDS(best_file)
+  
+  # 2. Extract specific statistic
+  df_stat <- preds_df %>% filter(Statistic == stat)
+  df_stat<-df_stat[2:20,]
+  # Helper to set the correct math expression for the axis
+  get_stat_expr <- function(s) {
+    if (s %in% c("rho_all", "rho_wet")) return(bquote(rho^{(k)}))
+    return(bquote(.(s)))
+  }
+  metric_expr <- get_stat_expr(stat)
+  
+  # 3. Extract Best Model
+  best_mod <- best_models %>% filter(Statistic == stat) %>% pull(Model)
+  best_mod_label <- gsub("Weibull_", "Wei-", gsub("PowerLaw_", "Lom-", best_mod))
+  
+  # For cross-correlation, we fit all 4 models
+  active_models <- c("PowerLaw_1p", "PowerLaw_2p", "Weibull_1p", "Weibull_2p")
+  
+  # 4. Pivot models into long format for line aesthetics
+  df_lines <- df_stat %>%
+    select(Scale_k, all_of(active_models)) %>%
+    pivot_longer(cols = -Scale_k, names_to = "Model", values_to = "Value") %>%
+    mutate(Model = factor(Model, 
+                          levels = c("PowerLaw_1p", "PowerLaw_2p", "Weibull_1p", "Weibull_2p"),
+                          labels = c("Lom-1p", "Lom-2p", "Wei-1p", "Wei-2p"))) %>%
+    filter(!is.na(Value))
+  
+  # 5. Phase points for empirical data
+  df_points <- df_stat %>%
+    filter(!is.na(Actual)) %>%
+    mutate(Phase = factor(ifelse(Scale_k >= 24, "Calib. data", "Valid. data"),
+                          levels = c("Calib. data", "Valid. data")))
+  
+  # Format pair name for the title
+  pair_name <- gsub("_vs_", " vs ", basename(pair_folder_path))
+  
+  # 6. Build the ggplot
+  p_scale <- ggplot() +
+    # Reference lines at k=1 and k=24
+    geom_vline(xintercept = c(24), linetype = "dashed", color = "darkgray", linewidth = 0.8) +
+    
+    # Prediction lines
+    geom_line(data = df_lines, aes(x = Scale_k, y = Value, color = Model, linetype = Model), linewidth = 1) +
+    
+    # Empirical points
+    geom_point(data = df_points, aes(x = Scale_k, y = Actual, fill = Phase), 
+               shape = 21, color = "transparent", size = 2.5) +
+    
+    # Scales and Axes
+    scale_x_log10(breaks = c(1, 2, 4, 12, 24, 48, 96, 240)) +
+    scale_y_continuous(limits = c(0, 1.05), breaks = seq(0, 1, by = 0.2)) +
+    
+    # Manual mappings for colors and linetypes
+    scale_color_manual(name = "", values = c("Lom-1p" = "red", "Lom-2p" = "red", "Wei-1p" = "blue", "Wei-2p" = "blue")) +
+    scale_linetype_manual(name = "", values = c("Lom-1p" = "solid", "Lom-2p" = "dashed", "Wei-1p" = "solid", "Wei-2p" = "dashed")) +
+    scale_fill_manual(name = "", values = c("Calib. data" = "black", "Valid. data" = "orange")) +
+    
+    # Labels
+    labs(
+      title = paste("St. ID:", pair_name), 
+      subtitle = paste("Best Model:", best_mod_label), 
+      x = "Temporal scale, k [h]", 
+      y = metric_expr
+    ) +
+    
+    # Theme configuration
+    theme_bw() + 
+    theme(
+      panel.grid.major = element_line(linetype = "dotted", color = "gray70"),
+      panel.grid.minor = element_blank(),
+      legend.position = "right",
+      legend.background = element_blank(), 
+      legend.key = element_blank(),        
+      legend.spacing.y = unit(0, "pt"),
+      legend.margin = margin(t = 2, r = 5, b = 2, l = 5)
+    ) +
+    
+    # Legend guide ordering
+    guides(
+      fill = guide_legend(order = 1, override.aes = list(size = 3)),
+      color = guide_legend(order = 2),
+      linetype = guide_legend(order = 2)
+    )
+  
+  return(p_scale)
 }
 
-
-df_lines <- data.frame(k = k_smooth)
-df_lines$`Wei-2p` <- H_W_2p_cross(k_smooth, get_param("Weibull_2p", "H_inf"), k_star, q_k_star, get_param("Weibull_2p", "Param_shape"))
-df_lines$`Wei-1p` <- H_W_1p_cross(k_smooth, k_star, q_k_star, get_param("Weibull_1p", "Param_shape"))
-df_lines$`Lom-2p` <- H_L_2p_cross(k_smooth, get_param("PowerLaw_2p", "H_inf"), k_star, q_k_star, get_param("PowerLaw_2p", "Param_shape"))
-df_lines$`Lom-1p` <- H_L_1p_cross(k_smooth, k_star, q_k_star, get_param("PowerLaw_1p", "Param_shape"))
-
-
-df_lines_long <- df_lines %>%
-  pivot_longer(cols = -k, names_to = "Model", values_to = "Prediction") %>%
-  mutate(Model = factor(Model, levels = c("Lom-1p", "Lom-2p", "Wei-1p", "Wei-2p")))
-
-# =====================================================================
-# 3. BUILD THE EXACT PLOT
-# =====================================================================
-ggplot() +
-
-  geom_vline(xintercept = c(1, 24), linetype = "dashed", color = "gray70", linewidth = 0.8) +
-
-  geom_line(data = df_lines_long, aes(x = k, y = Prediction, color = Model, linetype = Model), linewidth = 1) +
-  
-
-  geom_point(data = df_points, aes(x = k, y = rho, fill = Data_Type), 
-             shape = 21, color = "transparent", size = 2.5) +
-  
-  
-  scale_x_continuous(
-    trans = "log", 
-    breaks = c(1, 2, 4, 12, 24, 48, 96, 216),
-    labels = c(1, 2, 4, 12, 24, 48, 96, 216),
-    expand = c(0.05, 0.05)
-  ) +
-  
- 
-  scale_y_continuous(
-    limits = c(0, 1), 
-    breaks = seq(0, 1, by = 0.2),
-    sec.axis = dup_axis(name = expression(rho^"(i,j)"))
-  ) +
-  scale_color_manual(
-    name = NULL,
-    values = c("Lom-1p" = "red", "Lom-2p" = "red", "Wei-1p" = "blue", "Wei-2p" = "blue")
-  ) + scale_linetype_manual(
-    name = NULL,
-    values = c("Lom-1p" = "solid", "Lom-2p" = "dashed", "Wei-1p" = "solid", "Wei-2p" = "dashed")
-  ) + scale_fill_manual(
-    name = NULL,
-    values = c("Calib. data" = "black", "Valid. data" = "orange")
-  ) +
-
-  labs(
-    x = "Temporal scale, k [h]", 
-    y = expression(rho^"(i,j)"), 
-    title = "St. ID: Station 1 vs Station 2"
-  ) +
-  
-
-  theme_bw() +
-  theme(
-
-    panel.grid.major = element_line(linetype = "dashed", color = "gray85"),
-    panel.grid.minor = element_blank(),
-    
-    # Title centering
-    plot.title = element_text(hjust = 0.5, size = 11),
-    
-
-    legend.position = c(0.9,0.25 ),
-    legend.background = element_rect(color = "black", fill = "white", linewidth = 0.5),
-    legend.key = element_blank(),
-    legend.spacing.y = unit(0.3, "cm"), # Tightly pack the legend items
-    legend.margin = margin(t = 2, r = 5, b = 2, l = 5)
-  ) +
-  
-
-  guides(
-    fill = guide_legend(order = 1, override.aes = list(shape = 21, size = 3, color = c("black", "orange"))),
-    color = guide_legend(order = 2, override.aes = list(linewidth = 1)),
-    linetype = guide_legend(order = 2)
-  )
+# Example Usage:
+pair_dir <- pair_dir
+my_plot <- plot_cross_correlation_ggplot(file.path(pair_dir, "DE_00003_vs_DE_00020"))
+ print(my_plot)
 ```
-
 
